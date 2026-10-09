@@ -95,3 +95,13 @@
 - 新功能分支 feat/m2-manual-ice-cli-send-receive：新增实验 CLI send/receive，要求双方显式指定本机网卡 IP、授权目录；手动 INVITE/REPLY + 可信通道比较码确认，再经 SDK 完整 ICE/mTLS/双 QUIC 调用 Transfer Core 真实文件收发。
 - 新增五架构 native Debug 构建/测试工作流及 docs/MANUAL_TEST_PREVIEW.md。**最新 Rust CI 和五平台构建均通过之前，不声称可以手动双机测试。**
 - 未完成：远端浏览/GET、目录递归、取消/单任务调度、滑动窗口与恢复、TUI/GUI，以及真实跨 NAT 和 ICE restart/consent。Debug 只是早期预览，不是稳定 Release。
+
+## 首个五平台双机手动传输预览已通过自动化测试（2026-10-09）
+
+- **[Transfer PR #6](https://github.com/juezhong/p2p-transfer/pull/6) 已合并**（08a4cfe）：真正的文件块收发、分离控制/数据 Stream、接收方磁盘写入后累计 ACK、.part/SHA-256/no-clobber 提交。Tokio 双端模拟单元/集成测试成功。
+- **[Transfer PR #7](https://github.com/juezhong/p2p-transfer/pull/7) 已合并**（814d380）：直接使用 SDK VerifiedManualSession 的两条独立 Control/Data QUIC Stream；[CI #37927466032](https://github.com/juezhong/p2p-transfer/actions/runs/37927466032) 通过真实 SDK 手动 v2 + ICE nomination + mTLS 端到端文件落盘测试（localhost）。
+- **[Transfer PR #8](https://github.com/juezhong/p2p-transfer/pull/8) 已合并**（f1f7575）：提供可实际运行的 CLI send/receive；通过手动 INVITE/REPLY、独立人工核对六位码、ICE 直连提名、双向 mTLS、独立 Control/Data QUIC 发送文件；也增加五平台 Debug Artifact 工作流及 LAN/NAT 手工测试文档。
+- 最新 PR #8 [Rust Checks #37928856036](https://github.com/juezhong/p2p-transfer/actions/runs/37928856036) **success**；[五平台 Debug #37928856150](https://github.com/juezhong/p2p-transfer/actions/runs/37928856150) **success**：Windows x86_64、macOS x86_64/aarch64、Linux x86_64/aarch64 全部原生构建、执行包含两进程交互式配对+文件传输的完整 Workspace 测试、上传五份 Artifact。曾修复 Windows capability-handle 清理和 CLI 主线程栈问题。
+- **现在可以进行实验性质的双机 LAN 手工测试**，参见 [docs/MANUAL_TEST_PREVIEW.md](MANUAL_TEST_PREVIEW.md)；同网段测试通过后才尝试 STUN/跨 NAT。未得到用户真实 LAN/NAT 结果，不能宣称公网 NAT 打洞已验证。
+- **仍未完成 Go v0.16.4 等价功能**：远端目录浏览、主动 GET、文件夹递归、多文件批量、滑动窗口/重传恢复、Data QUIC 断后自动重连、取消和任务 lease、TUI/GUI。当前单文件一在途块，不适合性能评估；CLI 为实验版，不是稳定 Release。
+- 下一批开发需优先接入远端目录及 GET、滑动窗口 ACK/重传和故障恢复、更多自动化安全测试；SDK 还需 consent freshness、ICE restart、PCP/NAT-PMP/UPnP、多网卡与实际跨 NAT 优化，保持直连无 relay。两份长期设计 PR 不合并。
