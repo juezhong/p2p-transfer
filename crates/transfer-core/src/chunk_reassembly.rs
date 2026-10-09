@@ -251,10 +251,15 @@ mod tests {
 
     #[test]
     fn accepts_large_offsets_without_u32_truncation() {
-        let mut send = ResendWindow::new(5 * 1024 * 1024 * 1024u64, CHUNK_BYTES * 4).unwrap();
-        for _ in 0..4 { send.next_chunk().unwrap(); }
-        send.ack((CHUNK_BYTES * 4) as u64).unwrap();
-        let next = send.next_chunk().unwrap();
-        assert_eq!(next.start, (CHUNK_BYTES * 4) as u64);
+        let total = 5 * 1024 * 1024 * 1024u64;
+        let mut send = ResendWindow::new(total, CHUNK_BYTES * 4).unwrap();
+        for i in 0..5120u64 {
+            let next = send.next_chunk().unwrap();
+            assert_eq!(next.start, i * CHUNK_BYTES as u64);
+            send.ack(next.end).unwrap();
+        }
+        assert!(send.is_complete());
+        assert_eq!(send.acknowledged(), total);
+        assert!(send.next_chunk().is_none());
     }
 }
