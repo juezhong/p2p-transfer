@@ -125,7 +125,7 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
             put_sent = true;
         }
         if put_sent && !get_sent && peer == Peer::Creator
-            && line.contains("[PUT]") && line.contains("已由接收端校验并提交")
+            && line.contains("[PUT] 文件或目录任务完成")
         {
             enter(&mut a, "ls");
             enter(&mut a, "get 收到.txt 回传.txt");
