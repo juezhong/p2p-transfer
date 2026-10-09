@@ -2,5 +2,6 @@
 //! Network connectivity must eventually be supplied exclusively by p2p-sdk.
 
 pub mod task;
+pub mod protocol;
 
 pub use task::{Task, TaskError, TaskId, TaskPhase};

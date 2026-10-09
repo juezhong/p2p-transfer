@@ -45,3 +45,11 @@
 - [功能 PR #2](https://github.com/juezhong/p2p-transfer/pull/2) 初始 CI 因 `transfer-core/src/task.rs` 的 `cargo fmt --check` 失败。
 - 已在同一功能分支修正格式；[最新成功的 GitHub Actions](https://github.com/juezhong/p2p-transfer/actions/runs/37899185667) 完成 fmt、clippy 与 cargo test。
 - 仅验证 M0 Workspace/任务状态机；**文件传输、SDK 连接与 CLI/TUI/GUI 仍未实现**。切勿把绿色 CI 当成全部业务功能完成。
+
+
+## 进展（2026-10-09）：M0 应用控制协议基础
+
+- 已合并 M0 Workspace：[PR #2](https://github.com/juezhong/p2p-transfer/pull/2)，main squash commit `99ecfe0`。
+- 开发中：[PR #3](https://github.com/juezhong/p2p-transfer/pull/3)：带版本、类型、请求 ID、1 MiB payload 上限的 Rust 控制帧编解码与单元测试。**不兼容旧 Go 线协议。**
+- 尚无真实的 RPC、文件 I/O、身份认证、上传/下载；CLI/TUI/GUI 仍为占位。
+- 下一步：目录访问权限、路径越界防护和文件传输 RPC 语义测试；在 SDK 完成安全会话后集成实际传输。
