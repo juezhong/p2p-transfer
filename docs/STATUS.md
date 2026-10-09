@@ -29,3 +29,12 @@
 1. 查看最新开发 PR，核实 M0 已实现的具体代码和测试结果。
 2. 在 SDK 达到可用前，先完成 `transfer-core` 状态机、路径权限与文件协议的测试驱动开发。
 3. SDK 真实 Session API 完成后开展 TC-001/TC-003 双进程传输。
+
+
+## 已创建的功能 PR（2026-10-09）
+
+- [Transfer 开发 PR #2 — M0 Workspace、任务状态与四项测试](https://github.com/juezhong/p2p-transfer/pull/2)，**Draft，未合并**。
+- 包含 `transfer-core`、`transfer-cli`、`transfer-tui`、`transfer-gui` Cargo crates。后三者**只是明确标示未实现的占位入口**，不是实际 CLI/TUI/GUI。
+- Task 状态机包含开始、写入确认、校验阶段、完成、取消与失败；不具备真实文件 I/O、SHA-256、SDK 连接或上传下载。
+- **未运行本地 Rust 编译/测试**：当前环境没有 rustc/cargo；下一 Agent 应核对 PR CI 并修正 fmt/clippy/test。
+- 可并行的下一项：路径授权安全模型及文件协议编解码测试，避免在 Transfer 内重复实现 SDK 的网络模块。
