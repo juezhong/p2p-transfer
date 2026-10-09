@@ -6,6 +6,9 @@
 //! Not yet Go-parity: no recursive directory transfer, resume or multi-lane
 //! streaming windows. Do not call this a stable release.
 
+mod interactive;
+mod shell;
+
 use std::{
     env,
     io::{self, Write},
@@ -115,6 +118,7 @@ async fn async_main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let action = args.first().map(String::as_str);
     let result = match action {
+        None => interactive::run().await,
         Some("send") if args.len() >= 5 => {
             async {
                 let bind = parse_bind(&args[1])?;
@@ -136,7 +140,8 @@ async fn async_main() {
         _ => { usage(); std::process::exit(2) }
     };
     match result {
-        Ok(()) => println!("Transfer completed and verified."),
+        Ok(()) if action.is_some() => println!("Transfer completed and verified."),
+        Ok(()) => {} ,
         Err(err) => {
             eprintln!("Transfer failed: {err}");
             std::process::exit(1);
