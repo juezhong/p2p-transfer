@@ -265,7 +265,7 @@ pub async fn serve_control_stream_with_lease(
                 // lease, not a remote grant. Future request-ID binding will
                 // distinguish it from unsolicited payload more precisely.
                 let authorized = inbound_file_authorized(
-                    arbiter, &grants.lock().await,
+                    arbiter, &*grants.lock().await,
                 );
                 if !authorized {
                     write_frame(
