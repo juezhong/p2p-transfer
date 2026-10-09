@@ -2,7 +2,7 @@
 //! Queries run on the async session task; the terminal reader never blocks
 //! the Tokio runtime and remote listings still respect each peer's SharedRoot.
 
-use std::{path::{Path, PathBuf}, sync::mpsc, time::Duration};
+use std::{path::Path, sync::mpsc, time::Duration};
 
 use rustyline::{
     completion::{Completer, Pair},
@@ -118,7 +118,7 @@ fn encode_argument(path: &str, original: &str) -> String {
     if original.starts_with('"') || original.starts_with('\'')
         || path.chars().any(char::is_whitespace)
     {
-        format!("\\\"{}\\\"", path.replace('\\', "\\\\").replace('"', "\\\""))
+        format!("\"{}\"", path.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         path.replace('\\', "\\\\").replace('"', "\\\"")
     }
