@@ -44,8 +44,8 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Build Transfer CLI debug
         run: cargo build -p transfer-cli --bin p2p-transfer --target ${{ matrix.target }}
-      - name: Run Transfer core tests
-        run: cargo test -p transfer-core --target ${{ matrix.target }}
+      - name: Run all workspace tests including two-process CLI loopback
+        run: cargo test --workspace --target ${{ matrix.target }}
       - name: Upload CLI debug artifact
         uses: actions/upload-artifact@v4
         with:
