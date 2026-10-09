@@ -248,8 +248,13 @@ pub async fn serve_control_stream_with_lease(
             // The authoritative creator must reject unsolicited file payload
             // even if the peer passed TLS/session authentication. A matching
             // transfer lease is an additional application authorization gate.
-            if let Some((_, grants)) = lease {
-                let authorized = grants.lock().await.permits_inbound_file();
+            if let Some((arbiter, grants)) = lease {
+                // Incoming DATA can also be the authorized response to a
+                // locally initiated GET: the creator then holds the LOCAL
+                // lease, not a remote grant. Future request-ID binding will
+                // distinguish it from unsolicited payload more precisely.
+                let authorized = grants.lock().await.permits_inbound_file()
+                    || arbiter.active_request().is_some();
                 if !authorized {
                     write_frame(
                         &mut control, FrameKind::Error, first.request_id,
