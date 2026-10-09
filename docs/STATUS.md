@@ -81,3 +81,10 @@
 - 按用户决定，五平台最终 Debug/Release 全部由 Transfer 提供（Windows x86_64、macOS x86_64/aarch64、Linux x86_64/aarch64）；SDK 不单独分发 Debug。Transfer CLI 必须能够显示已认证 ICE 提名候选及 QUIC 连接诊断，让真实两机传文件同时验证 SDK。
 - SDK #20/#21/#22/#23 已合并且相关 CI 通过，但尚无真实公网 NAT 打洞证明；Transfer 现已有 Workspace/协议帧/授权目录/.part/SHA-256 基础，真正网络 PUT/GET、ACK/重传、可用 CLI/TUI/GUI 和跨平台发行仍待开发。
 - 优先并行推进 Transfer 协议/目录操作和 SDK 真实 Session 集成；第一个可发布用户测试版门槛是**两台机器安全配对、ICE 选路、独立控制数据 QUIC、实际传输并校验 SHA-256**。真实 NAT 环境要用户最终测试。进度优先评论长期记录 PR #1，不合并该 PR。
+
+## M2 真正文件收发业务内核（开发 PR / 未经 CI 验证）
+
+- 新功能分支 `feat/m2-transfer-stream-engine`：`transfer-core::stream_transfer` 通过**独立控制与数据 Async Stream** 实现文件 Offer、顺序数据块、落盘后的累计 ACK、最终 SHA-256 / 原子 no-clobber commit；直接复用 cap-std 安全共享根目录。详见 `docs/STREAM_TRANSFER.md`。
+- 添加 tokio::io::duplex 自动化收发测试，含 >2 个块、Unicode、0 字节、目录越界拒绝和报文边界。CI 通过前不得标记完成。
+- **尚未可两机手测**：尚未绑定 SDK VerifiedManualSession 的 QUIC Stream，CLI 仍为占位；M3 sliding window/重传/取消、TUI/GUI、五平台产物仍未实现。不发测试版。
+- 下一功能批次首要任务是 SDK 认证双 QUIC 与本 Stream Core 连接并执行真实 QUIC 文件发送/落盘集成测试，之后再打通手动 LAN 配对 CLI。
