@@ -4,6 +4,7 @@
 //! Recursive transfer, remote cancellation and resume are future gates.
 
 use std::{
+    future::Future,
     collections::{HashMap, VecDeque},
     path::{Component, Path, PathBuf},
     time::Duration,
@@ -13,9 +14,10 @@ use std::{
 
 use tokio::{sync::{mpsc, oneshot, Mutex}, task::JoinHandle};
 use transfer_core::{
+    lease::TransferLease,
     recursive::{gather_directory, ManifestEntry},
     rpc::list_in_root,
-    sdk_quic::{list_typed_via_sdk, list_via_sdk, mkdir_via_sdk, request_get_via_sdk, send_via_sdk, serve_control_stream, IncomingResult},
+    sdk_quic::{acquire_transfer_via_sdk, release_transfer_via_sdk, list_typed_via_sdk, list_via_sdk, mkdir_via_sdk, request_get_via_sdk, send_via_sdk, serve_control_stream_with_lease, IncomingResult, RemoteLeaseGrant},
     secure_io::SharedRoot,
 };
 
@@ -182,9 +184,45 @@ async fn get_path(
     Ok(())
 }
 
+/// The creator is the one authoritative lease arbitrator for this pair.
+/// Joiner asks over already authenticated Control QUIC. The returned
+/// guard stays alive for a whole directory transfer, not each individual
+/// file, so unrelated transfer tasks cannot overlap the Data QUIC lane.
+async fn with_batch_lease<F>(
+    session: &p2p_sdk::verified_session::VerifiedManualSession,
+    arbiter: &TransferLease,
+    is_creator: bool,
+    batch_id: u64,
+    operation: F,
+) -> CliResult<()>
+where
+    F: Future<Output = CliResult<()>>,
+{
+    let local = if is_creator {
+        Some(arbiter.try_acquire(batch_id)
+            .map_err(|_| "对端或本机已有文件传输任务".to_owned())?)
+    } else {
+        acquire_transfer_via_sdk(session, batch_id)
+            .await.map_err(|e| format!("远端已占用文件传输租约：{e:?}"))?;
+        None
+    };
+    let result = operation.await;
+    if !is_creator {
+        let release = release_transfer_via_sdk(session, batch_id).await;
+        if result.is_ok() {
+            release.map_err(|e| format!("远端租约释放失败：{e:?}"))?;
+        }
+    }
+    drop(local);
+    result
+}
+
 pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let session = Arc::clone(&peer.session);
     let active = Arc::new(AtomicBool::new(false));
+    let arbiter = TransferLease::new();
+    let remote_grant: RemoteLeaseGrant = Arc::new(Mutex::new(Default::default()));
+    let is_creator = peer.role == "创建方";
     let pending_downloads: PendingDownloads = Arc::new(Mutex::new(HashMap::new()));
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     input_thread(tx);
@@ -194,6 +232,7 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let mut previous_local = PathBuf::new();
     let mut previous_remote = PathBuf::new();
     let mut task: Option<JoinHandle<()>> = None;
+    let mut active_batch_id: Option<u64> = None;
 
     loop {
         tokio::select! {
@@ -203,11 +242,14 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let session = Arc::clone(&session);
                         let root = Arc::clone(&root);
                         let pending = Arc::clone(&pending_downloads);
+                        let arbiter = arbiter.clone();
+                        let remote_grant = Arc::clone(&remote_grant);
                         tokio::spawn(async move {
                             // Separate control RPCs may remain usable while
                             // a data task is running; the protocol dispatcher
                             // never passes file bytes on Control QUIC.
-                            match serve_control_stream(&session, &root, send, recv).await {
+                            let auth = if is_creator { Some((&arbiter, &remote_grant)) } else { None };
+                            match serve_control_stream_with_lease(&session, &root, send, recv, auth).await {
                                 Ok(IncomingResult::Received(receipt)) => {
                                     println!("\n[文件] 已接收并验证 {} 字节（SHA-256 OK）", receipt.bytes);
                                     if let Some(done) = pending.lock().await.remove(&receipt.request_id) {
@@ -292,8 +334,13 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let session = Arc::clone(&session);
                         let root = Arc::clone(&root);
                         let activity = Arc::clone(&active);
+                        let lease = arbiter.clone();
+                        let batch_id = next_id();
+                        active_batch_id = Some(batch_id);
                         task = Some(tokio::spawn(async move {
-                            match put_path(&session, &root, &source, &remote).await {
+                            let result = with_batch_lease(&session, &lease, is_creator, batch_id,
+                                put_path(&session, &root, &source, &remote)).await;
+                            match result {
                                 Ok(()) => println!("\n[PUT] 文件或目录任务完成"),
                                 Err(err) => eprintln!("\n[PUT] 失败：{err}"),
                             }
@@ -315,10 +362,14 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let root = Arc::clone(&root);
                         let pending = Arc::clone(&pending_downloads);
                         let activity = Arc::clone(&active);
+                        let lease = arbiter.clone();
+                        let batch_id = next_id();
+                        active_batch_id = Some(batch_id);
                         task = Some(tokio::spawn(async move {
-                            match get_path(&session, &root, Path::new(&source),
-                                Path::new(&destination), &pending).await
-                            {
+                            let result = with_batch_lease(&session, &lease, is_creator, batch_id,
+                                get_path(&session, &root, Path::new(&source),
+                                    Path::new(&destination), &pending)).await;
+                            match result {
                                 Ok(()) => println!("\n[GET] 文件或目录任务全部校验提交"),
                                 Err(err) => eprintln!("\n[GET] 失败：{err}"),
                             }
@@ -329,6 +380,15 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         if let Some(handle) = task.take() {
                             if !handle.is_finished() {
                                 handle.abort();
+                                if !is_creator {
+                                    if let Some(id) = active_batch_id.take() {
+                                        let session = Arc::clone(&session);
+                                        tokio::spawn(async move {
+                                            let _ = handle.await;
+                                            let _ = release_transfer_via_sdk(&session, id).await;
+                                        });
+                                    }
+                                }
                                 active.store(false, Ordering::SeqCst);
                                 println!("[CANCEL] 已中止本地任务；Control QUIC 保持连接");
                             } else {
@@ -346,6 +406,15 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                     Ok(()) => {
                         if let Some(handle) = task.take() {
                             handle.abort();
+                            if !is_creator {
+                                if let Some(id) = active_batch_id.take() {
+                                    let session = Arc::clone(&session);
+                                    tokio::spawn(async move {
+                                        let _ = handle.await;
+                                        let _ = release_transfer_via_sdk(&session, id).await;
+                                    });
+                                }
+                            }
                             active.store(false, Ordering::SeqCst);
                             println!("\n[CANCEL] 当前本地任务已中断，会话仍然保持");
                         } else {

@@ -23,9 +23,17 @@ use transfer_core::{
     secure_io::SharedRoot,
 };
 
-#[tokio::test]
-async fn real_sdk_manual_pairing_ice_mtls_dual_quic_transfers_file_to_disk() {
-    tokio::time::timeout(Duration::from_secs(30), async {
+#[test]
+fn real_sdk_manual_pairing_ice_mtls_dual_quic_transfers_file_to_disk() {
+    // A real ICE+QUIC handshake builds large futures; don't accidentally
+    // depend on the test harness's small per-thread default stack.
+    std::thread::Builder::new().name("sdk-transfer-integration".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all().build().unwrap();
+            runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(30), async {
         let mut id = [0u8; 12];
         getrandom::fill(&mut id).unwrap();
         let temp = std::env::temp_dir().join(format!(
@@ -184,5 +192,7 @@ async fn real_sdk_manual_pairing_ice_mtls_dual_quic_transfers_file_to_disk() {
         client.close(0u32.into(), b"done");
         drop(src);
         std::fs::remove_dir_all(temp).unwrap();
-    }).await.expect("SDK-integrated real file transfer on localhost timed out");
+                }).await.expect("SDK-integrated real file transfer on localhost timed out");
+            });
+        }).expect("spawn SDK test worker").join().expect("SDK test worker panicked");
 }

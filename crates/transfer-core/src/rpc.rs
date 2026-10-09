@@ -12,6 +12,8 @@ const LIST_OP: u8 = 1;
 const GET_OP: u8 = 2;
 const LIST_TYPES_OP: u8 = 3;
 const MKDIR_OP: u8 = 4;
+const ACQUIRE_TRANSFER_OP: u8 = 5;
+const RELEASE_TRANSFER_OP: u8 = 6;
 const MAX_ENTRIES: usize = 8192;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,6 +22,9 @@ pub enum RpcRequest {
     Get { source: String, destination: String },
     ListTypes { directory: String },
     MakeDirectory { directory: String },
+    /// Grant/Release are only honored by the session's creating side.
+    AcquireTransfer,
+    ReleaseTransfer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,6 +73,8 @@ impl RpcRequest {
                 bytes.push(MKDIR_OP);
                 push_string(&mut bytes, directory)?;
             }
+            Self::AcquireTransfer => bytes.push(ACQUIRE_TRANSFER_OP),
+            Self::ReleaseTransfer => bytes.push(RELEASE_TRANSFER_OP),
             Self::Get { source, destination } => {
                 bytes.push(GET_OP);
                 push_string(&mut bytes, source)?;
@@ -90,6 +97,8 @@ impl RpcRequest {
             MKDIR_OP => Self::MakeDirectory {
                 directory: read_string(bytes, &mut pos)?.to_owned(),
             },
+            ACQUIRE_TRANSFER_OP => Self::AcquireTransfer,
+            RELEASE_TRANSFER_OP => Self::ReleaseTransfer,
             GET_OP => Self::Get {
                 source: read_string(bytes, &mut pos)?.to_owned(),
                 destination: read_string(bytes, &mut pos)?.to_owned(),
@@ -208,6 +217,8 @@ mod tests {
             RpcRequest::Get { source: "foo bar.txt".into(), destination: "远端/文件.txt".into() },
             RpcRequest::ListTypes { directory: "子目录".into() },
             RpcRequest::MakeDirectory { directory: "new/子目录".into() },
+            RpcRequest::AcquireTransfer,
+            RpcRequest::ReleaseTransfer,
         ] {
             assert_eq!(RpcRequest::decode(&r.encode().unwrap()), Ok(r));
         }
