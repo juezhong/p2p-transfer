@@ -112,3 +112,9 @@
 - 新增对 Control Stream 首帧的安全分派：文件 PUT offer 或目录/GET RPC，允许一条连接进行多次请求；GET 通过**反向独立 Data QUIC** 将文件写入发起方已授权的目录。
 - 真实 SDK 手动 ICE v2 + mTLS localhost 集成测试扩展为 PUT→LS→GET→双方磁盘字节相同。CI 绿之前不视为验收完成。
 - 还缺 Go 式交互 CLI、递归传输、取消/抢占、滑动窗口、恢复及公网 NAT 手测；不创建正式 Release。长期记录 PR #1 不合并。
+
+## Go 式无参数交互 CLI（开发中，须验收 CI）
+
+- [Transfer PR #9](https://github.com/juezhong/p2p-transfer/pull/9) 已通过最新 Rust Checks 与五平台 native Debug CI 并合并（`465003a`）：SDK 已认证 Control QUIC 上的远端 LIST / GET RPC，文件数据通过独立 Data QUIC 双向传输；真实 ICE/mTLS localhost PUT→LS→GET 测试通过。
+- 新功能分支 `feat/m3-go-style-interactive-cli` 将程序无参数启动转换成 Go 风格菜单「创建/加入/退出」，SDK 自动查找本机实际 IPv4/IPv6 网卡、自动 UDP 端口及可选 STUN，再提供持续命令 shell：pwd/ls/cd、lpwd/lls/lcd、put/get、status/cancel/quit；含跨两个真实无参数 CLI 进程的交互和 PUT/GET 测试。详见 docs/INTERACTIVE_CLI.md。**以最新 CI 结果为准，尚未自动完成。**
+- 与 Go 差异：必须确认共享根（默认 cwd），拒绝访问范围以外的绝对路径；单网卡 UDP Owner、文件不支持目录递归、无窗口/重传/恢复、cancel 仅初步本机中断、无 Tab 补全、未发布正式版本。五平台真实网络 NAT 穿透未验证。
