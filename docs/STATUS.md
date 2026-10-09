@@ -151,3 +151,9 @@
 - 新增 `transfer-core::lease::TransferLease` 的 RAII 独占任务 lease；同一会话本地不可有两个独立活动的文件任务，异步取消会 Drop 并释放 lease；目录/状态 RPC 不必独占 Data QUIC。增加并发争用、异常取消、重新获得租约的自动化测试。
 - **没有宣称跨设备租约仲裁完成**：此模块仅是本地构件，下一步要在认证的 Control QUIC 上实现双端申请/授予/释放与并发冲突一致决策，随后整合到 send/receive/GET、目录批次以及真正远端取消；没接入前 CLI 仍存在 A/B 同时发起的竞态风险。
 - 其他主要未完成：未确认块的重传、Data QUIC 恢复、最多四条独立 Data QUIC、Tab 补全、ICE consent/restart/网关端口映射、完整性能验收。稳定 Release 继续暂缓；TUI/GUI 依用户要求后置。
+
+## M3 双端文件任务仲裁（2026-10-09，功能 PR 进行中）
+
+- 添加 Transfer Control QUIC 专用 `AcquireTransfer`/`ReleaseTransfer` RPC。由创建连接一侧统一授予或拒绝独占 transfer lease；另一端发起的整个目录 PUT/GET 批次开始前必须先申请，结束或取消时释放。host 本地批次和 remote grant 共用同一个原子 TransferLease；目录列表、CD、status 仍与数据任务分开。
+- 客户端 `put/get` 不再仅依赖本端 AtomicBool：现在进一步通过已验证 Control QUIC 和权威方做跨端的任务争用判断。文件载荷仍只经 Data QUIC。
+- 当前还有待 CI 与真实竞态覆盖：恶意对端跳过申请绕过 RPC、租约释放消息丢失后的 TTL/重连回收、双方同时启动及 Ctrl-C 恢复测试。合并不能代替这些后续测试，仍不满足稳定 Release 条件。
