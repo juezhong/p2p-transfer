@@ -19,7 +19,7 @@ use p2p_sdk::{
     verified_session::{establish_initiator, establish_responder},
 };
 use transfer_core::{
-    sdk_quic::{receive_via_sdk, send_via_sdk},
+    sdk_quic::{receive_via_sdk, send_via_sdk, serve_control_stream, list_via_sdk, request_get_via_sdk, IncomingResult},
     secure_io::SharedRoot,
 };
 
@@ -141,6 +141,18 @@ async fn real_sdk_manual_pairing_ice_mtls_dual_quic_transfers_file_to_disk() {
                 &replay_guard, 103, Duration::from_secs(5),
             ).await.unwrap();
             let receipt = receive_via_sdk(&session, &dst).await.unwrap();
+
+            // The Control QUIC session stays alive and can serve ls + GET.
+            let (tx, rx) = session.control().accept_bi().await.unwrap();
+            assert!(matches!(
+                serve_control_stream(&session, &dst, tx, rx).await.unwrap(),
+                IncomingResult::DirectoryListed
+            ));
+            let (tx, rx) = session.control().accept_bi().await.unwrap();
+            assert!(matches!(
+                serve_control_stream(&session, &dst, tx, rx).await.unwrap(),
+                IncomingResult::ServedGet(_)
+            ));
             done_rx.await.unwrap();
             server.close(0u32.into(), b"done");
             receipt
@@ -157,6 +169,14 @@ async fn real_sdk_manual_pairing_ice_mtls_dual_quic_transfers_file_to_disk() {
             &session, &src, Path::new("文件.bin"), "收到.bin", 42,
         ).await.unwrap();
         assert_eq!(sent.bytes, content.len() as u64);
+
+        let remote_names = list_via_sdk(&session, "".into(), 43).await.unwrap();
+        assert!(remote_names.iter().any(|name| name == "收到.bin"));
+        request_get_via_sdk(&session, "收到.bin".into(), "回传.bin".into(), 44)
+            .await.unwrap();
+        let returned = receive_via_sdk(&session, &src).await.unwrap();
+        assert_eq!(returned.bytes, content.len() as u64);
+        assert_eq!(std::fs::read(temp.join("source/回传.bin")).unwrap(), content);
         done_tx.send(()).unwrap();
         let received = responder.await.unwrap();
         assert_eq!(sent, received);
