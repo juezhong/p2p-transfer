@@ -154,7 +154,8 @@ impl PartWriter {
         if self.written != self.total_bytes {
             return Err(FileAccessError::WrongFileLength);
         }
-        if self.hash.clone().finalize().as_slice() != expected_sha256 {
+        let observed: [u8; 32] = self.hash.clone().finalize().into();
+        if observed != expected_sha256 {
             return Err(FileAccessError::ChecksumMismatch);
         }
         let file = self.file.as_mut().ok_or(FileAccessError::Io)?;
