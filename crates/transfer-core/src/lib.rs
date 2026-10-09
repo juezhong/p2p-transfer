@@ -7,3 +7,5 @@ pub mod protocol;
 pub use task::{Task, TaskError, TaskId, TaskPhase};
 
 pub mod access;
+
+pub mod secure_io;
