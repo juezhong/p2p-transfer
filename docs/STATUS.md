@@ -38,3 +38,10 @@
 - Task 状态机包含开始、写入确认、校验阶段、完成、取消与失败；不具备真实文件 I/O、SHA-256、SDK 连接或上传下载。
 - **未运行本地 Rust 编译/测试**：当前环境没有 rustc/cargo；下一 Agent 应核对 PR CI 并修正 fmt/clippy/test。
 - 可并行的下一项：路径授权安全模型及文件协议编解码测试，避免在 Transfer 内重复实现 SDK 的网络模块。
+
+
+## CI 故障处理记录（2026-10-09）
+
+- [功能 PR #2](https://github.com/juezhong/p2p-transfer/pull/2) 初始 CI 因 `transfer-core/src/task.rs` 的 `cargo fmt --check` 失败。
+- 已在同一功能分支修正格式；[最新成功的 GitHub Actions](https://github.com/juezhong/p2p-transfer/actions/runs/37899185667) 完成 fmt、clippy 与 cargo test。
+- 仅验证 M0 Workspace/任务状态机；**文件传输、SDK 连接与 CLI/TUI/GUI 仍未实现**。切勿把绿色 CI 当成全部业务功能完成。
