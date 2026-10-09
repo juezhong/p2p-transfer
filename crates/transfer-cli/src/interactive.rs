@@ -1,7 +1,7 @@
 //! Go-style, argument-free manual pairing UI; Rust-only new wire protocol.
 //! Actual interface discovery, ICE, STUN and mTLS are owned by p2p-sdk.
 
-use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use p2p_sdk::{
     ice_gather::gather,
