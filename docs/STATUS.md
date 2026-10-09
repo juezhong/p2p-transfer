@@ -169,3 +169,9 @@
 - 功能分支 `feat/m3-enforce-inbound-transfer-lease` 在**创建方权威 Control QUIC 入站分派**对 PUT TransferControl 和 GET RPC 执行 live remote grant 检查。未取得租约或取消释放后收到的文件请求必须返回 Error，不允许直接进入 Data QUIC 流。目录浏览仍可独立使用 Control RPC。
 - 新增单测：无 grant、授权后、错误 release、正确 release、旧 grant replay；以最新 CI 通过为验收依据。
 - 此阶段仍未完成 lease ID 与每个子文件 request ID 的强认证绑定；短暂控制流竞态、断连 lease TTL 回收与真正 CANCEL 应作为下一阶段重点，不能说所有恶意并发已完全解决。稳定版本继续暂缓。
+
+## Go 风格无启动参数 CLI 统一入口（并行分支重放）
+
+- 原 [功能 PR #19](https://github.com/juezhong/p2p-transfer/pull/19) 在安全 PR #18 合并后产生冲突；本分支基于最新 main 重放仅 CLI 启动入口、README、测试文档及进程级 help/version/拒绝旧 send/receive 的测试；与 #18 服务端租约安全修复同时保留。
+- 保持唯一 `p2p-transfer` 无参数启动菜单，旧 `send/receive IP PATH` 只作为历史原型，不向最终用户暴露。真正 PUT/GET 在安全配对成功后的 Go 式交互 shell 执行。
+- Go 功能等价尚缺 Data QUIC 恢复/重传、最多四条 Data QUIC、Tab 补全、ICE consent/restart、PCP/NAT-PMP/UPnP、2GiB/真实跨 NAT 测试；TUI/GUI 按用户要求后置，未发行稳定版。
