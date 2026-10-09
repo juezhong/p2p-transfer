@@ -369,6 +369,66 @@ mod tests {
     }
 
     #[test]
+    fn cumulative_ack_rejects_regression_and_unsent_offsets() {
+        let ack = |offset: u64| Frame {
+            kind: FrameKind::Ack,
+            request_id: 9,
+            payload: offset.to_be_bytes().to_vec(),
+        };
+        assert_eq!(cumulative_ack(ack(20), 9, 10, 30).unwrap(), 20);
+        assert!(cumulative_ack(ack(10), 9, 10, 30).is_err());
+        assert!(cumulative_ack(ack(31), 9, 10, 30).is_err());
+        assert!(cumulative_ack(ack(20), 8, 10, 30).is_err());
+    }
+
+    #[tokio::test]
+    async fn sender_pipelines_multiple_chunks_before_waiting_for_control_ack() {
+        use tokio::io::AsyncReadExt;
+        let (base, root, _dst_path, dst) = fixture();
+        let bytes = vec![0xAB; CHUNK * 3];
+        fs::write(base.join("source/pipeline.bin"), &bytes).unwrap();
+        let (mut sender_control, mut receiver_control) = duplex(8 * 1024);
+        let (mut sender_data, mut receiver_data) = duplex(512 * 1024);
+
+        let receiver = async {
+            let offered = read_frame(&mut receiver_control).await.unwrap();
+            assert_eq!(offered.kind, FrameKind::TransferControl);
+            write_frame(&mut receiver_control, FrameKind::Ack, 30, 0u64.to_be_bytes().to_vec()).await.unwrap();
+            let mut seen = 0u64;
+            // Intentionally withhold ACK until *two full chunks* arrive.
+            // Stop-and-wait would deadlock this receiver.
+            for index in 0..3 {
+                let n = receiver_data.read_u32().await.unwrap() as usize;
+                assert_eq!(n, CHUNK);
+                let mut chunk = vec![0u8; n];
+                receiver_data.read_exact(&mut chunk).await.unwrap();
+                assert_eq!(chunk, vec![0xAB; n]);
+                seen += n as u64;
+                if index >= 1 {
+                    write_frame(
+                        &mut receiver_control, FrameKind::Ack, 30,
+                        seen.to_be_bytes().to_vec(),
+                    ).await.unwrap();
+                }
+            }
+            write_frame(&mut receiver_control, FrameKind::TransferControl, 30, b"DONE".to_vec()).await.unwrap();
+        };
+        let (sent, ()) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            async {
+                tokio::join!(
+                    send_file(&mut sender_control, &mut sender_data, &root, Path::new("pipeline.bin"), "pipeline-recv.bin", 30),
+                    receiver,
+                )
+            },
+        ).await.expect("sliding-window sender blocked waiting for per-chunk ACK");
+        assert_eq!(sent.unwrap().bytes, (CHUNK * 3) as u64);
+        drop(root);
+        drop(dst);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn rejects_overlong_and_invalid_metadata() {
         let offer = Offer { bytes: 1, sha256: [0; 32], destination: "x".repeat(MAX_PATH_BYTES + 1) };
         assert!(matches!(offer.encode(), Err(TransferError::Protocol(_))));
