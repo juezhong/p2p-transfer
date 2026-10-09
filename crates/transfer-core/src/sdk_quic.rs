@@ -214,8 +214,11 @@ pub async fn serve_control_stream(
                             Ok(IncomingResult::DirectoryListed)
                         }
                         Err(_) => {
-                            write_frame(&mut control, FrameKind::Error, request_id, b"typed listing denied".to_vec()).await?;
-                            Err(SdkTransferError::InvalidDataStream)
+                            write_frame(&mut control, FrameKind::Error, request_id, b"typed listing unavailable".to_vec()).await?;
+                            // Files are not directories. A failed directory
+                            // probe is a normal protocol response; the client
+                            // may attempt a regular authorized GET instead.
+                            Ok(IncomingResult::DirectoryListed)
                         }
                     }
                 }
