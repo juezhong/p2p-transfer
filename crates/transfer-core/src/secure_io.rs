@@ -226,6 +226,7 @@ mod tests {
         let opened = root.open_read(Path::new("子目录/名前.txt")).unwrap();
         assert_eq!(hash_open_file(opened).unwrap(), expected);
         assert!(location.join("子目录/名前.txt").exists());
+        drop(root);
         std::fs::remove_dir_all(location).unwrap();
     }
 
@@ -243,6 +244,7 @@ mod tests {
         sink.append(b"ab").unwrap();
         assert_eq!(sink.verify_and_commit([0; 32]), Err(FileAccessError::ChecksumMismatch));
         assert!(!location.join("check.bin").exists());
+        drop(root);
         std::fs::remove_dir_all(location).unwrap();
     }
 
@@ -255,6 +257,7 @@ mod tests {
         sink.append(b"replacement").unwrap();
         assert_eq!(sink.verify_and_commit(hash), Err(FileAccessError::Io));
         assert_eq!(std::fs::read(location.join("existing.bin")).unwrap(), b"original");
+        drop(root);
         std::fs::remove_dir_all(location).unwrap();
     }
 
@@ -272,6 +275,7 @@ mod tests {
         symlink(&outside, location.join("escape")).unwrap();
         assert!(root.open_read(Path::new("escape")).is_err());
         std::fs::remove_file(outside).unwrap();
+        drop(root);
         std::fs::remove_dir_all(location).unwrap();
     }
 }

@@ -162,6 +162,7 @@ async fn real_sdk_manual_pairing_ice_mtls_dual_quic_transfers_file_to_disk() {
         assert_eq!(sent, received);
         assert_eq!(std::fs::read(temp.join("receiver/收到.bin")).unwrap(), content);
         client.close(0u32.into(), b"done");
+        drop(src);
         std::fs::remove_dir_all(temp).unwrap();
     }).await.expect("SDK-integrated real file transfer on localhost timed out");
 }

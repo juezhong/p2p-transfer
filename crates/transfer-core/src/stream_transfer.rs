@@ -283,6 +283,8 @@ mod tests {
         assert_eq!(crate::secure_io::hash_open_file(
             dst.open_read(Path::new("子目录/接收.bin")).unwrap()
         ).unwrap(), sent.sha256);
+        drop(src);
+        drop(dst);
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -298,6 +300,8 @@ mod tests {
         );
         assert_eq!(send.unwrap(), recv.unwrap());
         assert_eq!(fs::read(dst_path.join("empty.txt")).unwrap(), b"");
+        drop(src);
+        drop(dst);
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -314,6 +318,8 @@ mod tests {
         assert!(matches!(send, Err(TransferError::RemoteRejected)));
         assert!(matches!(recv, Err(TransferError::Filesystem(FileAccessError::InvalidRelativePath))));
         assert!(!base.join("escape").exists());
+        drop(src);
+        drop(dst);
         fs::remove_dir_all(base).unwrap();
     }
 
