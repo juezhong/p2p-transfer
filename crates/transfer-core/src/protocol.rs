@@ -29,7 +29,7 @@ pub enum FrameKind {
 impl TryFrom<u16> for FrameKind {
     type Error = CodecError;
 
-    fn try_from(value: u16) -> Result<Self, Self::Error> {
+    fn try_from(value: u16) -> Result<Self, CodecError> {
         match value {
             1 => Ok(Self::Hello),
             2 => Ok(Self::RpcRequest),
