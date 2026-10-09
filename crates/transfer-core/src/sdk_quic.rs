@@ -95,8 +95,8 @@ pub async fn send_via_sdk(
     let mut control = ControlIo::new(control_recv, control_send);
     let mut data = session.data().open_uni().await
         .map_err(|_| SdkTransferError::DataConnection)?;
-    data.write_all(&DATA_PREFACE).await
-        .map_err(|_| SdkTransferError::DataConnection)?;
+    AsyncWriteExt::write_all(&mut data, &DATA_PREFACE).await
+        .map_err(SdkTransferError::Io)?;
     let receipt = send_file(
         &mut control, &mut data, root, source, remote_destination, request_id,
     ).await?;
@@ -117,7 +117,7 @@ pub async fn receive_via_sdk(
     let mut data = session.data().accept_uni().await
         .map_err(|_| SdkTransferError::DataConnection)?;
     let mut preface = [0u8; DATA_PREFACE.len()];
-    data.read_exact(&mut preface).await?;
+    AsyncReadExt::read_exact(&mut data, &mut preface).await?;
     if preface != DATA_PREFACE {
         return Err(SdkTransferError::InvalidDataStream);
     }
