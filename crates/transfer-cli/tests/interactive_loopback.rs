@@ -79,7 +79,7 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
     let mut get_sent = false;
     let mut get_done = false;
     let mut transcript = Vec::new();
-    let end = Instant::now() + Duration::from_secs(75);
+    let end = Instant::now() + Duration::from_secs(115);
     while !get_done {
         let remaining = end.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -103,7 +103,7 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
                 reply = true;
             }
         }
-        if let Some((_, code)) = line.split_once("双方独立核对 6 位校验码：") {
+        if let Some((_, code)) = line.split_once("双方设备应显示相同的 6 位配对核对码：") {
             match peer {
                 Peer::Creator => first_code = Some(code.trim().to_owned()),
                 Peer::Joiner => second_code = Some(code.trim().to_owned()),
@@ -112,8 +112,8 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
         if let (Some(one), Some(two)) = (&first_code, &second_code) {
             if !confirmed {
                 assert_eq!(one, two, "ICE/manual TLS transcript comparison mismatch");
-                enter(&mut a, two);
-                enter(&mut b, one);
+                enter(&mut a, "yes");
+                enter(&mut b, "yes");
                 confirmed = true;
             }
         }
@@ -121,6 +121,14 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
             ready[if peer == Peer::Creator { 0 } else { 1 }] = true;
         }
         if ready.iter().all(|x| *x) && !put_sent {
+            // 两个真正的 CLI 进程在超过旧 30s QUIC idle timeout 后，
+            // 应当仍能接受 Control RPC，并完成双向文件传输。
+            thread::sleep(Duration::from_secs(38));
+            assert!(a.try_wait().unwrap().is_none(), "creator died during idle");
+            assert!(b.try_wait().unwrap().is_none(), "joiner died during idle");
+            enter(&mut a, "help");
+            enter(&mut a, "status");
+            enter(&mut b, "status");
             enter(&mut a, "put 原始.txt 收到.txt");
             put_sent = true;
         }

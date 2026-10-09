@@ -4,6 +4,7 @@
 //! Creating/joining a connection, browsing and PUT/GET live in the persistent
 //! interactive shell. SDK exclusively owns P2P/ICE/TLS/QUIC networking.
 
+mod completion;
 mod interactive;
 mod shell;
 

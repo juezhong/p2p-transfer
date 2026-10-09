@@ -124,4 +124,4 @@ jobs:
           (cd dist && sha256sum p2p-transfer-* > SHA256SUMS.txt)
           gh release create "$TAG" dist/p2p-transfer-* dist/SHA256SUMS.txt \
             --target "$GITHUB_SHA" --prerelease --title "p2p-transfer $TAG (NAT field-test preview)" \
-            --notes-file docs/releases/preview-v0.1.0-test.2.md
+            --notes-file docs/releases/preview-v0.1.0-test.3.md
