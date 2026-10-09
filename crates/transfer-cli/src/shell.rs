@@ -221,7 +221,7 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let session = Arc::clone(&peer.session);
     let active = Arc::new(AtomicBool::new(false));
     let arbiter = TransferLease::new();
-    let remote_grant: RemoteLeaseGrant = Arc::new(Mutex::new(None));
+    let remote_grant: RemoteLeaseGrant = Arc::new(Mutex::new(Default::default()));
     let is_creator = peer.role == "创建方";
     let pending_downloads: PendingDownloads = Arc::new(Mutex::new(HashMap::new()));
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
