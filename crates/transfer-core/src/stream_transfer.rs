@@ -5,9 +5,8 @@
 //! SDK authenticates the QUIC Control/Data sessions; this module intentionally
 //! knows nothing about ICE, STUN, credentials or network path selection.
 //!
-//! M2 correctness baseline: one outstanding chunk, bounded memory. The
-//! Go-parity adaptive sliding window, retry/resume and multiplexing are later
-//! features, NOT claimed here.
+//! M3: bounded 4 MiB cumulative-ACK sender pipeline; data-QUIC failure
+//! retransmit/recovery and multiple independent data lanes remain pending.
 
 use std::{io::Read, path::Path};
 
@@ -21,6 +20,7 @@ use crate::{
 };
 
 const CHUNK: usize = 128 * 1024;
+const WINDOW_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 1024;
 const OFFER_FIXED: usize = 8 + 32 + 2;
 
@@ -125,6 +125,25 @@ fn expect_ack(frame: Frame, request_id: u64, expected: u64) -> Result<(), Transf
     Ok(())
 }
 
+/// Accept only a strictly advancing cumulative disk-written ACK bounded
+/// by data actually sent on the QUIC data channel, not a QUIC write receipt.
+fn cumulative_ack(
+    frame: Frame, request_id: u64, previous: u64, sent: u64,
+) -> Result<u64, TransferError> {
+    if frame.request_id != request_id {
+        return Err(TransferError::Protocol("wrong request ID"));
+    }
+    if frame.kind == FrameKind::Error { return Err(TransferError::RemoteRejected); }
+    if frame.kind != FrameKind::Ack || frame.payload.len() != 8 {
+        return Err(TransferError::Protocol("invalid cumulative ACK"));
+    }
+    let offset = u64::from_be_bytes(frame.payload.try_into().unwrap());
+    if offset <= previous || offset > sent {
+        return Err(TransferError::Protocol("invalid cumulative ACK offset"));
+    }
+    Ok(offset)
+}
+
 /// Send one explicitly authorized local file over a dedicated data stream,
 /// receiving disk-write ACKs over a distinct control stream.
 ///
@@ -161,17 +180,26 @@ where
     let mut file = root.open_read(source)?;
     let mut task = Task::new(TaskId(request_id), bytes);
     task.start().map_err(|_| TransferError::Protocol("task state error"))?;
+    // A bounded number of chunks may be in flight. Unlike stop-and-wait,
+    // a high-RTT path can keep sending while disk-written ACKs return on
+    // the independent Control QUIC. This is not yet retry/resume on reset.
     let mut sent = 0u64;
-    while sent < bytes {
-        let n = CHUNK.min((bytes - sent) as usize);
-        file.read_exact(&mut buf[..n])?;
-        data.write_all(&(n as u32).to_be_bytes()).await?;
-        data.write_all(&buf[..n]).await?;
+    let mut acknowledged = 0u64;
+    while acknowledged < bytes {
+        while sent < bytes && sent - acknowledged < WINDOW_BYTES as u64 {
+            let available = (WINDOW_BYTES as u64 - (sent - acknowledged))
+                .min(CHUNK as u64)
+                .min(bytes - sent) as usize;
+            file.read_exact(&mut buf[..available])?;
+            data.write_all(&(available as u32).to_be_bytes()).await?;
+            data.write_all(&buf[..available]).await?;
+            sent += available as u64;
+        }
         data.flush().await?;
-        sent += n as u64;
-        expect_ack(read_frame(control).await?, request_id, sent)?;
-        task.acknowledge_written(sent)
+        let next = cumulative_ack(read_frame(control).await?, request_id, acknowledged, sent)?;
+        task.acknowledge_written(next)
             .map_err(|_| TransferError::Protocol("task acknowledgement failed"))?;
+        acknowledged = next;
     }
     // The receiver checks SHA, fsyncs, and atomically publishes before DONE.
     let final_frame = read_frame(control).await?;
@@ -335,6 +363,66 @@ mod tests {
         assert!(matches!(recv, Err(TransferError::Filesystem(FileAccessError::InvalidRelativePath))));
         assert!(!base.join("escape").exists());
         drop(src);
+        drop(dst);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn cumulative_ack_rejects_regression_and_unsent_offsets() {
+        let ack = |offset: u64| Frame {
+            kind: FrameKind::Ack,
+            request_id: 9,
+            payload: offset.to_be_bytes().to_vec(),
+        };
+        assert_eq!(cumulative_ack(ack(20), 9, 10, 30).unwrap(), 20);
+        assert!(cumulative_ack(ack(10), 9, 10, 30).is_err());
+        assert!(cumulative_ack(ack(31), 9, 10, 30).is_err());
+        assert!(cumulative_ack(ack(20), 8, 10, 30).is_err());
+    }
+
+    #[tokio::test]
+    async fn sender_pipelines_multiple_chunks_before_waiting_for_control_ack() {
+        use tokio::io::AsyncReadExt;
+        let (base, root, _dst_path, dst) = fixture();
+        let bytes = vec![0xAB; CHUNK * 3];
+        fs::write(base.join("source/pipeline.bin"), &bytes).unwrap();
+        let (mut sender_control, mut receiver_control) = duplex(8 * 1024);
+        let (mut sender_data, mut receiver_data) = duplex(512 * 1024);
+
+        let receiver = async {
+            let offered = read_frame(&mut receiver_control).await.unwrap();
+            assert_eq!(offered.kind, FrameKind::TransferControl);
+            write_frame(&mut receiver_control, FrameKind::Ack, 30, 0u64.to_be_bytes().to_vec()).await.unwrap();
+            let mut seen = 0u64;
+            // Intentionally withhold ACK until *two full chunks* arrive.
+            // Stop-and-wait would deadlock this receiver.
+            for index in 0..3 {
+                let n = receiver_data.read_u32().await.unwrap() as usize;
+                assert_eq!(n, CHUNK);
+                let mut chunk = vec![0u8; n];
+                receiver_data.read_exact(&mut chunk).await.unwrap();
+                assert_eq!(chunk, vec![0xAB; n]);
+                seen += n as u64;
+                if index >= 1 {
+                    write_frame(
+                        &mut receiver_control, FrameKind::Ack, 30,
+                        seen.to_be_bytes().to_vec(),
+                    ).await.unwrap();
+                }
+            }
+            write_frame(&mut receiver_control, FrameKind::TransferControl, 30, b"DONE".to_vec()).await.unwrap();
+        };
+        let (sent, ()) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            async {
+                tokio::join!(
+                    send_file(&mut sender_control, &mut sender_data, &root, Path::new("pipeline.bin"), "pipeline-recv.bin", 30),
+                    receiver,
+                )
+            },
+        ).await.expect("sliding-window sender blocked waiting for per-chunk ACK");
+        assert_eq!(sent.unwrap().bytes, (CHUNK * 3) as u64);
+        drop(root);
         drop(dst);
         fs::remove_dir_all(base).unwrap();
     }
