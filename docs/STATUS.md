@@ -61,3 +61,10 @@
 - M0 协议基础：[PR #3](https://github.com/juezhong/p2p-transfer/pull/3) 已合并；提交 `2702a70`。Rust 新线协议的固定头、版本、FrameKind、request_id、1 MiB payload 上限与边界测试。最新 PR Actions fmt/Clippy/test 已通过；这只是 Frame codec，不是可用的 RPC 或文件传输。
 - 仍**没有**实际网络连接、文件系统 RPC、上传/下载、.part、SHA-256、真正 TUI/GUI。不能按“可用版本”发布。
 - 下一项：`transfer-core` 文件路径授权/越界阻断（FT-04/FT-09/TC-022）和目录操作；待 SDK 的真正 QUIC Session API 可用后接入完整文件收发。
+
+## M2 最小文件访问授权准备（2026-10-09，开发 PR）
+
+- 在 `transfer-core` 添加 `AuthorizedRoot`：通过显式共享根目录授权读取，拒绝绝对路径、`..`、符号链接和不存在的文件；支持 Unicode 路径和目录列表；有单元测试。
+- **安全边界**：当前只是前置路径检查，不能抵御其他本地进程在检查与打开之间修改符号链接的 TOCTOU 竞态；**尚不提供安全文件写入 API**，在完善原子 descriptor-relative open 之前不能作为生产级远端读写沙箱。
+- SDK 的 ICE/Quinn 连接和 Transfer 的实际 PUT/GET/GUI 均未在本 PR 实现；Transfer 面向用户的五架构发布要等到业务和 SDK 联网流程可用后再启用。
+- 下一步：平台安全的 openat/handle-relative 打开，明确共享根目录和远端授权，目录 RPC + 文件读写 + SHA-256/.part 可靠提交，随后连接 SDK。
