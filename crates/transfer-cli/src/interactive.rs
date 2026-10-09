@@ -12,6 +12,7 @@ use p2p_sdk::{
     manual_pairing::ManualPairing,
     peer_pin::ManualConfirmation,
     quinn_socket::{demux_endpoint_config, QuinnUdpAdapter},
+    resilient_data::{ResilientDataLanes, MAX_DATA_LANES},
     session_binding::ReplayGuard,
     tls_identity::{authenticated_client_config, authenticated_server_config},
     udp_owner::UdpOwner,
@@ -23,6 +24,7 @@ use crate::{debug_error, now_secs, prompt, trust_peer_der, CliResult};
 
 pub struct ActivePeer {
     pub session: Arc<VerifiedManualSession>,
+    pub data_lanes: Arc<ResilientDataLanes>,
     pub peer_address: SocketAddr,
     pub local_address: SocketAddr,
     pub role: &'static str,
@@ -152,8 +154,12 @@ async fn create_connection(
         control, data, &pairing, &confirmation, now_secs()?,
         Duration::from_secs(10),
     ).await.map_err(debug_error)?;
+    let session = Arc::new(verified);
+    let data_lanes = Arc::new(ResilientDataLanes::start_creator(
+        &session, endpoint.clone(), nominated.remote, &pairing, MAX_DATA_LANES,
+    ).map_err(debug_error)?);
     Ok(ActivePeer {
-        session: Arc::new(verified), peer_address: nominated.remote,
+        session, data_lanes, peer_address: nominated.remote,
         local_address: local, role: "创建方", _owner: owner, _endpoint: endpoint,
     })
 }
@@ -201,13 +207,19 @@ async fn join_connection(
         .await.map_err(debug_error)?
         .ok_or("等待 Data QUIC 连接超时")?
         .await.map_err(debug_error)?;
-    let guard = ReplayGuard::new(16).map_err(debug_error)?;
+    // The replay window belongs to the entire long-lived session, not one
+    // short-lived Data lane. Preserve it across replacements.
+    let guard = Arc::new(ReplayGuard::new(4096).map_err(debug_error)?);
     let verified = establish_responder(
         control, data, &pairing, &confirmation, &guard, now_secs()?,
         Duration::from_secs(10),
     ).await.map_err(debug_error)?;
+    let session = Arc::new(verified);
+    let data_lanes = Arc::new(ResilientDataLanes::start_joiner(
+        &session, endpoint.clone(), &pairing, Arc::clone(&guard), MAX_DATA_LANES,
+    ).map_err(debug_error)?);
     Ok(ActivePeer {
-        session: Arc::new(verified), peer_address: nominated.remote,
+        session, data_lanes, peer_address: nominated.remote,
         local_address: local, role: "加入方", _owner: owner, _endpoint: endpoint,
     })
 }
