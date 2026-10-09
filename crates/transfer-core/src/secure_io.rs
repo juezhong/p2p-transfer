@@ -81,6 +81,14 @@ impl SharedRoot {
         Ok(names)
     }
 
+    /// Create a destination directory beneath the explicitly authorized root.
+    /// A remote request must first be authorized by the session's file
+    /// sharing policy; this cannot be used to create outside the root.
+    pub fn create_directory(&self, relative: &Path) -> Result<(), FileAccessError> {
+        clean_relative(relative)?;
+        self.root.create_dir_all(relative).map_err(io_error)
+    }
+
     /// Start writing one target file, but do not create/replace its final
     /// name until expected length and SHA-256 have both been verified.
     pub fn receive_part(
@@ -244,6 +252,21 @@ mod tests {
         sink.append(b"ab").unwrap();
         assert_eq!(sink.verify_and_commit([0; 32]), Err(FileAccessError::ChecksumMismatch));
         assert!(!location.join("check.bin").exists());
+        drop(root);
+        std::fs::remove_dir_all(location).unwrap();
+    }
+
+    #[test]
+    fn creates_nested_directory_but_rejects_outside_authorized_root() {
+        let (location, root) = fixture();
+        root.create_directory(Path::new("目录/嵌套/空")).unwrap();
+        assert!(location.join("目录/嵌套/空").is_dir());
+        for bad in ["../outside", "/etc", "目录/../outside"] {
+            assert_eq!(
+                root.create_directory(Path::new(bad)),
+                Err(FileAccessError::InvalidRelativePath)
+            );
+        }
         drop(root);
         std::fs::remove_dir_all(location).unwrap();
     }
