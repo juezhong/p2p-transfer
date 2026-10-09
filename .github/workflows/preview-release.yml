@@ -40,9 +40,25 @@ jobs:
             target: aarch64-unknown-linux-gnu
             filename: p2p-transfer-linux-aarch64
             executable: p2p-transfer
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            filename: p2p-transfer-linux-x86_64-musl
+            executable: p2p-transfer
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            filename: p2p-transfer-linux-aarch64-musl
+            executable: p2p-transfer
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
     steps:
       - uses: actions/checkout@v4
+      - name: Install native musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools binutils
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -51,6 +67,21 @@ jobs:
         run: cargo test --workspace --target ${{ matrix.target }}
       - name: Build optimized CLI
         run: cargo build -p transfer-cli --bin p2p-transfer --release --target ${{ matrix.target }}
+      - name: Verify MUSL ELF has no dynamic loader
+        if: contains(matrix.target, 'musl')
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/${{ matrix.executable }}"
+          if readelf -l "$BIN" | grep -q INTERP; then
+            echo "musl portable binary unexpectedly needs a dynamic loader" >&2
+            exit 1
+          fi
+          if readelf -d "$BIN" | grep -q NEEDED; then
+            echo "musl portable binary unexpectedly needs shared objects" >&2
+            exit 1
+          fi
+          file "$BIN"
       - name: Stage binary
         shell: bash
         run: |
@@ -89,8 +120,8 @@ jobs:
             echo "Preview $TAG already published; will not overwrite immutable test assets."
             exit 0
           fi
-          test "$(find dist -maxdepth 1 -name 'p2p-transfer-*' -type f | wc -l)" -eq 5
+          test "$(find dist -maxdepth 1 -name 'p2p-transfer-*' -type f | wc -l)" -eq 7
           (cd dist && sha256sum p2p-transfer-* > SHA256SUMS.txt)
           gh release create "$TAG" dist/p2p-transfer-* dist/SHA256SUMS.txt \
             --target "$GITHUB_SHA" --prerelease --title "p2p-transfer $TAG (NAT field-test preview)" \
-            --notes-file docs/releases/preview-v0.1.0-test.1.md
+            --notes-file docs/releases/preview-v0.1.0-test.2.md
