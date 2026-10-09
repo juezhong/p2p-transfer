@@ -8,6 +8,20 @@
 
 每次运行需明确授权当前共享根目录；远端文件系统操作被限制在授权目录之内。这与 Go 旧版本默认可访问全部用户可读写路径的行为**有意不同**，不能为模仿旧行为而破坏默认安全性。
 
+## Linux ARM64 / RK3568 兼容性
+
+`v0.1.0-test.1` 的 GNU ARM64 构建依赖较新 glibc，旧 rootfs 可能提示 `GLIBC_2.38 not found`。从 `v0.1.0-test.2` 开始另外提供 `p2p-transfer-linux-aarch64-musl` 与 `p2p-transfer-linux-x86_64-musl`：静态编译、无动态 glibc 依赖，更适合嵌入式 Linux。原 GNU/glibc 版本仍保留。ARM64 使用：
+
+```sh
+chmod +x p2p-transfer-linux-aarch64-musl
+./p2p-transfer-linux-aarch64-musl --version
+./p2p-transfer-linux-aarch64-musl
+```
+
+静态 musl 不保证兼容任何内核，仍需在目标板实测。**不要替换板上 glibc**。
+
+当前 `help/status`、远程 `pwd/ls/cd`、本地 `lpwd/lls/lcd`、递归 `put/get` 有实现；**Tab 本地/远程补全与 Go v0.16.4 传输可靠性模型尚未全量实现**，不能把当前测试预览当作完整对等版。
+
 ## 网络结构和状态
 
 SDK 负责 ICE/STUN、手动配对、双方设备证书 mTLS、独立 Control QUIC / Data QUIC；Transfer 负责文件/目录命令、4MiB 有界应用确认窗口、.part/SHA-256、权限与 UI。控制消息不会走数据载荷通道，也不提供 TURN/文件中继。

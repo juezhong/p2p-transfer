@@ -77,9 +77,16 @@ pub async fn run() -> CliResult<()> {
         }
     };
     let dir = std::env::current_dir().map_err(debug_error)?;
-    println!("当前目录：{}", dir.display());
-    println!("安全限制：对端只能在该目录下执行已授权的文件读取、目录浏览或写入。");
-    if prompt("允许本次会话访问上述共享根目录？输入 yes 确认：")? != "yes" {
+    println!("\n本次连接将共享的本机目录：");
+    println!("  {}", dir.display());
+    println!("对端连接成功后，可以列出并下载该目录内的文件及子目录，");
+    println!("也可以向该目录内上传文件或创建子目录（不会覆盖已有文件）。");
+    println!("对端不能读取或写入此目录以外的路径；本次授权仅在当前会话有效。");
+    let answer = prompt(&format!(
+        "确认允许对端访问【{}】及其子目录？输入 yes 授权，其余输入取消：",
+        dir.display()
+    ))?;
+    if answer != "yes" {
         return Err("未授权目录；会话未建立".into());
     }
     let root = Arc::new(SharedRoot::authorize(&dir).map_err(debug_error)?);
