@@ -53,3 +53,11 @@
 - 开发中：[PR #3](https://github.com/juezhong/p2p-transfer/pull/3)：带版本、类型、请求 ID、1 MiB payload 上限的 Rust 控制帧编解码与单元测试。**不兼容旧 Go 线协议。**
 - 尚无真实的 RPC、文件 I/O、身份认证、上传/下载；CLI/TUI/GUI 仍为占位。
 - 下一步：目录访问权限、路径越界防护和文件传输 RPC 语义测试；在 SDK 完成安全会话后集成实际传输。
+
+
+## 已完成并合并（2026-10-09）
+
+- M0 Workspace：[PR #2](https://github.com/juezhong/p2p-transfer/pull/2) 已合并；提交 `99ecfe0`。已有 `transfer-core` 任务状态机、三个仅占位的 CLI/TUI/GUI 可执行入口及相应 CI。
+- M0 协议基础：[PR #3](https://github.com/juezhong/p2p-transfer/pull/3) 已合并；提交 `2702a70`。Rust 新线协议的固定头、版本、FrameKind、request_id、1 MiB payload 上限与边界测试。最新 PR Actions fmt/Clippy/test 已通过；这只是 Frame codec，不是可用的 RPC 或文件传输。
+- 仍**没有**实际网络连接、文件系统 RPC、上传/下载、.part、SHA-256、真正 TUI/GUI。不能按“可用版本”发布。
+- 下一项：`transfer-core` 文件路径授权/越界阻断（FT-04/FT-09/TC-022）和目录操作；待 SDK 的真正 QUIC Session API 可用后接入完整文件收发。
