@@ -285,7 +285,6 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let suggested = source.file_name()
                             .ok_or("请输入有效的文件路径")?.to_string_lossy().to_string();
                         let remote = root_relative(&remote_cwd, args.get(2).map(String::as_str).unwrap_or(&suggested))?;
-                        let destination = relative_string(&remote)?;
                         if active.swap(true, Ordering::SeqCst) {
                             println!("[PUT] 当前已有文件任务");
                             continue;
