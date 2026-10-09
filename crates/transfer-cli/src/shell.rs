@@ -272,8 +272,8 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let (prompt_ready, ready_rx) = std::sync::mpsc::channel();
     let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
     let prompt_label = Arc::new(StdMutex::new("p2p[remote:/]> ".to_owned()));
-    input_thread(tx, ready_rx, completion_tx, Arc::clone(&prompt_label));
     help();
+    input_thread(tx, ready_rx, completion_tx, Arc::clone(&prompt_label));
     let mut local_cwd = PathBuf::new();
     let mut remote_cwd = PathBuf::new();
     let mut previous_local = PathBuf::new();
