@@ -109,13 +109,17 @@ mod tests {
     #[test]
     fn concurrent_acquires_have_exactly_one_winner() {
         let lease = TransferLease::new();
-        let guard = std::sync::Barrier::new(12);
+        let guard = Arc::new(std::sync::Barrier::new(12));
+        let attempted = Arc::new(std::sync::Barrier::new(12));
         let threads: Vec<_> = (1..=12).map(|id| {
             let lease = lease.clone();
-            let barrier = guard.clone();
+            let barrier = Arc::clone(&guard);
+            let attempted = Arc::clone(&attempted);
             std::thread::spawn(move || {
                 barrier.wait();
-                lease.try_acquire(id).ok()
+                let claimed = lease.try_acquire(id).ok();
+                attempted.wait();
+                claimed
             })
         }).collect();
         // Keep the winner guard alive until all threads have attempted
@@ -123,7 +127,7 @@ mod tests {
         // drop/re-acquisition and defeat the intended test.
         let mut winners = Vec::new();
         for handle in threads { if let Some(lease) = handle.join().unwrap() { winners.push(lease); } }
-        assert!(winners.len() <= 12);
+        assert_eq!(winners.len(), 1);
         assert!(lease.active_request().is_some());
         drop(winners);
         assert_eq!(lease.active_request(), None);
