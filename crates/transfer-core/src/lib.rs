@@ -9,3 +9,5 @@ pub use task::{Task, TaskError, TaskId, TaskPhase};
 pub mod access;
 
 pub mod secure_io;
+
+pub mod stream_transfer;
