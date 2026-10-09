@@ -68,3 +68,10 @@
 - **安全边界**：当前只是前置路径检查，不能抵御其他本地进程在检查与打开之间修改符号链接的 TOCTOU 竞态；**尚不提供安全文件写入 API**，在完善原子 descriptor-relative open 之前不能作为生产级远端读写沙箱。
 - SDK 的 ICE/Quinn 连接和 Transfer 的实际 PUT/GET/GUI 均未在本 PR 实现；Transfer 面向用户的五架构发布要等到业务和 SDK 联网流程可用后再启用。
 - 下一步：平台安全的 openat/handle-relative 打开，明确共享根目录和远端授权，目录 RPC + 文件读写 + SHA-256/.part 可靠提交，随后连接 SDK。
+
+## M2 基于目录句柄的真实安全文件 I/O（2026-10-09 开发中）
+
+- 新功能分支 `feat/m2-capability-safe-file-io` 使用成熟的跨平台 Rust `cap-std` 做真实目录句柄相对打开，防止只靠 canonicalize/字符串检查导致 TOCTOU 根目录逃逸；这是之前 `AuthorizedRoot` 仅预检 API 的替代方向。
+- 新增接收 `.part` 随机唯一文件、顺序流式写入与已写字节 ACK、SHA-256 校验、文件 `sync_all`、同目录 hard-link 原子 no-clobber 发布和 Drop/取消清理；完全位于 Transfer Core，不涉及 SDK 网络栈。
+- Linux/Unix 单元测试包括 Unicode 文件、路径穿越、符号链接逃逸、拒绝覆盖、校验失败不发布。尚未完成真正文件 RPC/远端授权、递归传输、磁盘故障与中途断电恢复；文件句柄 fsync 不保证所有文件系统的目录元数据持久化。须等 CI 实际通过再记录完成。
+- 用户最终五平台 Debug/Release 由 Transfer 发布；SDK 不发布独立 Debug。
