@@ -112,3 +112,9 @@
 - 新增对 Control Stream 首帧的安全分派：文件 PUT offer 或目录/GET RPC，允许一条连接进行多次请求；GET 通过**反向独立 Data QUIC** 将文件写入发起方已授权的目录。
 - 真实 SDK 手动 ICE v2 + mTLS localhost 集成测试扩展为 PUT→LS→GET→双方磁盘字节相同。CI 绿之前不视为验收完成。
 - 还缺 Go 式交互 CLI、递归传输、取消/抢占、滑动窗口、恢复及公网 NAT 手测；不创建正式 Release。长期记录 PR #1 不合并。
+
+## M3 累计 ACK 与有界流水线窗口（开发中）
+
+- 新开发分支 `feat/m3-bounded-cumulative-ack-window` 把旧版逐 128KiB 单块等待 ACK 改为最大 4 MiB 有界在途窗口，允许一个 QUIC Data Stream 在多个包未回 ACK 时持续写；Control QUIC ACK 必须严格大于前值、不超过实际已发送字节，Task 进度仅按接收方已写盘反馈前进。
+- 新增强制接收方收到两个 128 KiB 数据块后才 ACK 的异步测试，验证不再退化为 stop-and-wait，并测试 ACK 回退/越界/错误任务拒绝。**须以 CI 通过后才视为实现。**
+- 此优化不等于 Go v0.16.4 的多 data-only QUIC 并行恢复；断开后自动重传、文件 ID、故障修复、动态并行 lane 及网络长期 consent 仍未完成。
