@@ -88,3 +88,10 @@
 - 添加 tokio::io::duplex 自动化收发测试，含 >2 个块、Unicode、0 字节、目录越界拒绝和报文边界。CI 通过前不得标记完成。
 - **尚未可两机手测**：尚未绑定 SDK VerifiedManualSession 的 QUIC Stream，CLI 仍为占位；M3 sliding window/重传/取消、TUI/GUI、五平台产物仍未实现。不发测试版。
 - 下一功能批次首要任务是 SDK 认证双 QUIC 与本 Stream Core 连接并执行真实 QUIC 文件发送/落盘集成测试，之后再打通手动 LAN 配对 CLI。
+
+## 首个双机手动传文件 CLI（功能 PR 待验证）
+
+- Transfer [PR #6](https://github.com/juezhong/p2p-transfer/pull/6) CI 通过并合并：独立控制/数据流上的真实文件收发核心。Transfer [PR #7](https://github.com/juezhong/p2p-transfer/pull/7) 通过 [CI #37927466032](https://github.com/juezhong/p2p-transfer/actions/runs/37927466032) 并合并（814d380）：通过 SDK VerifiedManualSession 的独立 Control/Data QUIC 完成 localhost 标准 ICE 提名、mTLS、实际文件落盘、ACK 和 SHA-256。
+- 新功能分支 feat/m2-manual-ice-cli-send-receive：新增实验 CLI send/receive，要求双方显式指定本机网卡 IP、授权目录；手动 INVITE/REPLY + 可信通道比较码确认，再经 SDK 完整 ICE/mTLS/双 QUIC 调用 Transfer Core 真实文件收发。
+- 新增五架构 native Debug 构建/测试工作流及 docs/MANUAL_TEST_PREVIEW.md。**最新 Rust CI 和五平台构建均通过之前，不声称可以手动双机测试。**
+- 未完成：远端浏览/GET、目录递归、取消/单任务调度、滑动窗口与恢复、TUI/GUI，以及真实跨 NAT 和 ICE restart/consent。Debug 只是早期预览，不是稳定 Release。
