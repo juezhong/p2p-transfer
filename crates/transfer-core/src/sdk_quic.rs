@@ -6,6 +6,7 @@
 //! until multiplexed request-ID scheduling and repair are implemented.
 
 use std::{
+    collections::VecDeque,
     io,
     path::Path,
     pin::Pin,
@@ -172,7 +173,48 @@ async fn read_data_preface(
 
 /// Grants are retained for the entire remote batch. An Arc is shared by
 /// all concurrent Control RPC handlers on the authoritative creator.
-pub type RemoteLeaseGrant = std::sync::Arc<tokio::sync::Mutex<Option<LeaseGuard>>>;
+/// A bounded cancellation tombstone makes release-before-acquire safe:
+/// an aborted client may send Release while its earlier Acquire RPC is still
+/// in flight on another Control stream. That Acquire must never create a
+/// stranded remote grant after the cancellation.
+#[derive(Default)]
+pub struct RemoteLeaseState {
+    active: Option<LeaseGuard>,
+    canceled: VecDeque<u64>,
+}
+
+pub type RemoteLeaseGrant = std::sync::Arc<tokio::sync::Mutex<RemoteLeaseState>>;
+
+impl RemoteLeaseState {
+    fn acquire(&mut self, arbiter: &crate::lease::TransferLease, id: u64) -> bool {
+        if id == 0 || self.active.is_some() || self.canceled.contains(&id) {
+            return false;
+        }
+        if let Ok(grant) = arbiter.try_acquire(id) {
+            self.active = Some(grant);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Unknown Releases still install a cancellation tombstone to prevent
+    /// an earlier inflight Acquire from winning a race with the Release.
+    fn release(&mut self, id: u64) -> bool {
+        if id == 0 {
+            return false;
+        }
+        if let Some(active) = &self.active {
+            if active.request_id() != id { return false; }
+        }
+        self.active = None;
+        if !self.canceled.contains(&id) {
+            if self.canceled.len() == 128 { self.canceled.pop_front(); }
+            self.canceled.push_back(id);
+        }
+        true
+    }
+}
 
 /// Dispatch one already accepted Control QUIC stream. This makes an ongoing
 /// Control session capable of answering directory and GET requests while a
@@ -213,12 +255,7 @@ pub async fn serve_control_stream_with_lease(
                         false
                     } else if let Some((arbiter, remote_grant)) = lease {
                         let mut guard = remote_grant.lock().await;
-                        if guard.is_some() {
-                            false
-                        } else if let Ok(token) = arbiter.try_acquire(request_id) {
-                            *guard = Some(token);
-                            true
-                        } else { false }
+                        guard.acquire(arbiter, request_id)
                     } else { false };
                     if granted {
                         write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
@@ -230,10 +267,7 @@ pub async fn serve_control_stream_with_lease(
                 Ok(RpcRequest::ReleaseTransfer) => {
                     let released = if let Some((_, remote_grant)) = lease {
                         let mut guard = remote_grant.lock().await;
-                        if guard.as_ref().map(LeaseGuard::request_id) == Some(request_id) {
-                            *guard = None;
-                            true
-                        } else { false }
+                        guard.release(request_id)
                     } else { false };
                     if released {
                         write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
@@ -390,4 +424,48 @@ pub async fn release_transfer_via_sdk(
     let result = request_rpc(session, RpcRequest::ReleaseTransfer, id).await?;
     if result.payload != b"OK" { return Err(SdkTransferError::InvalidDataStream); }
     Ok(())
+}
+
+#[cfg(test)]
+mod transfer_lease_rpc_tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_before_acquire_prevents_stranded_grant() {
+        let lease = crate::lease::TransferLease::new();
+        let mut remote = RemoteLeaseState::default();
+        assert!(remote.release(33)); // Reordered Control QUIC streams.
+        assert!(!remote.acquire(&lease, 33));
+        assert_eq!(lease.active_request(), None);
+        assert!(remote.acquire(&lease, 34));
+        assert_eq!(lease.active_request(), Some(34));
+        assert!(!remote.release(35));
+        assert_eq!(lease.active_request(), Some(34));
+        assert!(remote.release(34));
+        assert_eq!(lease.active_request(), None);
+        assert!(!remote.acquire(&lease, 34)); // Replay blocked.
+    }
+
+    #[test]
+    fn remote_grant_blocks_creator_and_releases_on_abort() {
+        let lease = crate::lease::TransferLease::new();
+        let mut remote = RemoteLeaseState::default();
+        assert!(remote.acquire(&lease, 100));
+        assert!(lease.try_acquire(101).is_err());
+        assert!(!remote.acquire(&lease, 102));
+        assert!(remote.release(100));
+        assert!(lease.try_acquire(101).is_ok());
+        assert!(!remote.acquire(&lease, 100));
+    }
+
+    #[test]
+    fn rejected_or_zero_request_ids_never_grant_a_lease() {
+        let lease = crate::lease::TransferLease::new();
+        let mut remote = RemoteLeaseState::default();
+        assert!(!remote.acquire(&lease, 0));
+        assert!(!remote.release(0));
+        assert_eq!(lease.active_request(), None);
+        for id in 1..=150 { assert!(remote.release(id)); }
+        assert_eq!(remote.canceled.len(), 128);
+    }
 }
