@@ -12,9 +12,10 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
-use p2p_sdk::verified_session::VerifiedManualSession;
+use p2p_sdk::{resilient_data::ResilientDataLanes, verified_session::VerifiedManualSession};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::{
@@ -23,12 +24,24 @@ use crate::{
     rpc::{self, RpcRequest},
     secure_io::SharedRoot,
     stream_transfer::{
-        read_frame, receive_file, receive_file_after_offer, send_file,
+        read_frame, receive_file_after_offer, send_file,
         write_frame, TransferError, TransferReceipt,
     },
 };
 
 const DATA_PREFACE: [u8; 4] = *b"P2PD";
+const DATA_STREAM_ID_LEN: usize = DATA_PREFACE.len() + 8;
+
+fn data_preface(request_id: u64) -> [u8; DATA_STREAM_ID_LEN] {
+    let mut bytes = [0u8; DATA_STREAM_ID_LEN];
+    bytes[..4].copy_from_slice(&DATA_PREFACE);
+    bytes[4..].copy_from_slice(&request_id.to_be_bytes());
+    bytes
+}
+
+fn matches_data_preface(bytes: &[u8; DATA_STREAM_ID_LEN], expected_id: u64) -> bool {
+    expected_id != 0 && *bytes == data_preface(expected_id)
+}
 
 #[derive(Debug)]
 pub enum SdkTransferError {
@@ -98,12 +111,41 @@ pub async fn send_via_sdk(
     remote_destination: &str,
     request_id: u64,
 ) -> Result<TransferReceipt, SdkTransferError> {
+    send_on_managed_lane(session, None, root, source, remote_destination, request_id).await
+}
+
+/// Choose a fresh authenticated Data lane for each new file operation. The
+/// SDK maintains the four QUIC connections and heals broken ones; Transfer
+/// still owns chunk ACK/retransmit and cannot yet resume an interrupted file.
+pub async fn send_via_managed_sdk(
+    session: &VerifiedManualSession,
+    lanes: &ResilientDataLanes,
+    root: &SharedRoot,
+    source: &Path,
+    remote_destination: &str,
+    request_id: u64,
+) -> Result<TransferReceipt, SdkTransferError> {
+    send_on_managed_lane(session, Some(lanes), root, source, remote_destination, request_id).await
+}
+
+async fn send_on_managed_lane(
+    session: &VerifiedManualSession,
+    lanes: Option<&ResilientDataLanes>,
+    root: &SharedRoot,
+    source: &Path,
+    remote_destination: &str,
+    request_id: u64,
+) -> Result<TransferReceipt, SdkTransferError> {
     let (control_send, control_recv) = session.control().open_bi().await
         .map_err(|_| SdkTransferError::ControlConnection)?;
     let mut control = ControlIo::new(control_recv, control_send);
-    let mut data = session.data().open_uni().await
-        .map_err(|_| SdkTransferError::DataConnection)?;
-    AsyncWriteExt::write_all(&mut data, &DATA_PREFACE).await
+    let mut data = if let Some(pool) = lanes {
+        pool.open_uni(Duration::from_secs(30)).await
+            .map_err(|_| SdkTransferError::DataConnection)?
+    } else {
+        session.data().open_uni().await.map_err(|_| SdkTransferError::DataConnection)?
+    };
+    AsyncWriteExt::write_all(&mut data, &data_preface(request_id)).await
         .map_err(SdkTransferError::Io)?;
     let receipt = send_file(
         &mut control, &mut data, root, source, remote_destination, request_id,
@@ -122,20 +164,28 @@ pub async fn receive_via_sdk(
     let (control_send, control_recv) = session.control().accept_bi().await
         .map_err(|_| SdkTransferError::ControlConnection)?;
     let mut control = ControlIo::new(control_recv, control_send);
-    let mut data = session.data().accept_uni().await
-        .map_err(|_| SdkTransferError::DataConnection)?;
-    let mut preface = [0u8; DATA_PREFACE.len()];
-    AsyncReadExt::read_exact(&mut data, &mut preface).await?;
-    if preface != DATA_PREFACE {
-        return Err(SdkTransferError::InvalidDataStream);
-    }
-    receive_file(&mut control, &mut data, root).await.map_err(Into::into)
+    let offer = read_frame(&mut control).await?;
+    let mut data = read_data_preface(session, None, offer.request_id).await?;
+    receive_file_after_offer(offer, &mut control, &mut data, root)
+        .await.map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::duplex;
+
+    #[test]
+    fn data_stream_is_bound_to_its_control_request_id() {
+        let id = 77;
+        let preface = data_preface(id);
+        assert!(matches_data_preface(&preface, id));
+        assert!(!matches_data_preface(&preface, id + 1));
+        assert!(!matches_data_preface(&preface, 0));
+        let mut corrupted = preface;
+        corrupted[2] ^= 1;
+        assert!(!matches_data_preface(&corrupted, id));
+    }
 
     #[tokio::test]
     async fn wraps_separate_control_input_and_output_handles() {
@@ -163,12 +213,22 @@ pub enum IncomingResult {
 
 async fn read_data_preface(
     session: &VerifiedManualSession,
+    lanes: Option<&ResilientDataLanes>,
+    request_id: u64,
 ) -> Result<quinn::RecvStream, SdkTransferError> {
-    let mut data = session.data().accept_uni().await
-        .map_err(|_| SdkTransferError::DataConnection)?;
-    let mut preface = [0u8; DATA_PREFACE.len()];
+    let mut data = if let Some(pool) = lanes {
+        pool.accept_uni(Duration::from_secs(120)).await
+            .map_err(|_| SdkTransferError::DataConnection)?
+    } else {
+        session.data().accept_uni().await.map_err(|_| SdkTransferError::DataConnection)?
+    };
+    let mut preface = [0u8; DATA_STREAM_ID_LEN];
     AsyncReadExt::read_exact(&mut data, &mut preface).await?;
-    if preface != DATA_PREFACE { return Err(SdkTransferError::InvalidDataStream); }
+    // A Data stream from a different Control request must never be passed
+    // into a file sink, even when both streams are from the same TLS peer.
+    if !matches_data_preface(&preface, request_id) {
+        return Err(SdkTransferError::InvalidDataStream);
+    }
     Ok(data)
 }
 
@@ -281,7 +341,7 @@ pub async fn serve_control_stream(
     send: quinn::SendStream,
     recv: quinn::RecvStream,
 ) -> Result<IncomingResult, SdkTransferError> {
-    serve_control_stream_with_lease(session, root, send, recv, None).await
+    serve_control_stream_with_lease(session, root, send, recv, None, None).await
 }
 
 /// Creator-side dispatcher enforces one remote transfer grant at a time.
@@ -292,6 +352,7 @@ pub async fn serve_control_stream_with_lease(
     send: quinn::SendStream,
     recv: quinn::RecvStream,
     lease: Option<(&crate::lease::TransferLease, &RemoteLeaseGrant)>,
+    lanes: Option<&ResilientDataLanes>,
 ) -> Result<IncomingResult, SdkTransferError> {
     let mut control = ControlIo::new(recv, send);
     let first = read_frame(&mut control).await?;
@@ -314,7 +375,7 @@ pub async fn serve_control_stream_with_lease(
                     return Err(SdkTransferError::InvalidDataStream);
                 }
             }
-            let mut data = read_data_preface(session).await?;
+            let mut data = read_data_preface(session, lanes, first.request_id).await?;
             Ok(IncomingResult::Received(
                 receive_file_after_offer(first, &mut control, &mut data, root).await?
             ))
@@ -412,7 +473,7 @@ pub async fn serve_control_stream_with_lease(
                     }
                     write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
                     Ok(IncomingResult::ServedGet(
-                        send_via_sdk(session, root, Path::new(&source), &destination, request_id).await?
+                        send_on_managed_lane(session, lanes, root, Path::new(&source), &destination, request_id).await?
                     ))
                 }
                 Err(_) => {
