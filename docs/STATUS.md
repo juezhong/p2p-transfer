@@ -137,3 +137,11 @@
 - 此分支新增 RPC `ListTypes`（远端条目文件/目录类型）与 `MakeDirectory`（cap-std 受限建目录），并连接 CLI `put/get`：递归 PUT 按清单逐目录/文件发送；递归 GET 使用类型化列表逐层请求，等待**每个文件真正写盘和 SHA-256 提交**后才进入下一文件。仍保留独立 Control/Data QUIC。
 - 新增真正两个无参数 CLI 进程的目录 PUT→GET 自动测试，覆盖 Unicode、嵌套目录、空目录及 SHA-256 数据一致。以最新 CI 与五平台测试为准；**真实公网 NAT 还没验证**。
 - 尚缺故障后的重传/数据面恢复、完整单会话跨端任务仲裁、可靠远端取消、Tab 补全、PCP/NAT-PMP/UPnP、SDK consent/restart。暂不发布正式版本，TUI/GUI 延后。
+
+## 2026-10-09 Go 风格 CLI/目录递归阶段验证完成
+
+- [PR #11](https://github.com/juezhong/p2p-transfer/pull/11) squash `39388a1`：无启动参数的交互式创建/加入、自动网卡、目录导航与双向 PUT/GET，五平台验证。
+- [PR #13](https://github.com/juezhong/p2p-transfer/pull/13) squash `5516f3a`：在交互 CLI 上整合最高 4MiB 在途的累计写盘 ACK，最新 Rust + 五平台 Actions success。
+- [PR #14](https://github.com/juezhong/p2p-transfer/pull/14) squash `937b4ae`：cap-std 安全受限递归清单、深度/条目上限和安全 mkdir，五平台 Actions success。
+- [PR #15](https://github.com/juezhong/p2p-transfer/pull/15) squash `d081269`：[Rust CI #37936828907](https://github.com/juezhong/p2p-transfer/actions/runs/37936828907) 与 [五平台 Debug/双进程测试 #37936828883](https://github.com/juezhong/p2p-transfer/actions/runs/37936828883) 均 success。Control QUIC 目录类型 / mkdir RPC，Data QUIC 逐文件传输；CLI 的目录 PUT/GET 可遍历多层结构、保留空目录和 Unicode，GET 每文件等待实际校验提交，回归单文件测试修正正常的目录探测拒绝处理。
+- 当前仍**不符合旧 Go v0.16.4 完整功能对等**：远程可靠 CANCEL、双方 lease 仲裁、Data QUIC 断后重建与未确认块重传、最多四条 Data QUIC、高负载/2GiB 跨平台基准、Tab 补全、SDK NAT consent/restart/端口映射和公网双机手测尚未完成。按用户要求继续优先 CLI/SDK；TUI/GUI 暂缓，不创建冒充完成的正式 Release。
