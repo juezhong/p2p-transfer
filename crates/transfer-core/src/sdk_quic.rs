@@ -205,6 +205,32 @@ pub async fn serve_control_stream(
                         }
                     }
                 }
+                Ok(RpcRequest::ListTypes { directory }) => {
+                    match rpc::list_typed_in_root(root, &directory)
+                        .and_then(|entries| rpc::encode_typed_listing(&entries))
+                    {
+                        Ok(body) => {
+                            write_frame(&mut control, FrameKind::RpcResponse, request_id, body).await?;
+                            Ok(IncomingResult::DirectoryListed)
+                        }
+                        Err(_) => {
+                            write_frame(&mut control, FrameKind::Error, request_id, b"typed listing denied".to_vec()).await?;
+                            Err(SdkTransferError::InvalidDataStream)
+                        }
+                    }
+                }
+                Ok(RpcRequest::MakeDirectory { directory }) => {
+                    match rpc::make_directory_in_root(root, &directory) {
+                        Ok(()) => {
+                            write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
+                            Ok(IncomingResult::DirectoryListed)
+                        }
+                        Err(_) => {
+                            write_frame(&mut control, FrameKind::Error, request_id, b"mkdir denied".to_vec()).await?;
+                            Err(SdkTransferError::InvalidDataStream)
+                        }
+                    }
+                }
                 Ok(RpcRequest::Get { source, destination }) => {
                     if rpc::authorize_get(root, &source).is_err() {
                         write_frame(&mut control, FrameKind::Error, request_id, b"file denied".to_vec()).await?;
@@ -263,6 +289,27 @@ pub async fn request_get_via_sdk(
     request_id: u64,
 ) -> Result<(), SdkTransferError> {
     let response = request_rpc(session, RpcRequest::Get { source, destination }, request_id).await?;
+    if response.payload.as_slice() != b"OK" {
+        return Err(SdkTransferError::InvalidDataStream);
+    }
+    Ok(())
+}
+
+pub async fn list_typed_via_sdk(
+    session: &VerifiedManualSession,
+    directory: String,
+    request_id: u64,
+) -> Result<Vec<rpc::RemoteEntry>, SdkTransferError> {
+    let response = request_rpc(session, RpcRequest::ListTypes { directory }, request_id).await?;
+    rpc::decode_typed_listing(&response.payload).map_err(|_| SdkTransferError::InvalidDataStream)
+}
+
+pub async fn mkdir_via_sdk(
+    session: &VerifiedManualSession,
+    directory: String,
+    request_id: u64,
+) -> Result<(), SdkTransferError> {
+    let response = request_rpc(session, RpcRequest::MakeDirectory { directory }, request_id).await?;
     if response.payload.as_slice() != b"OK" {
         return Err(SdkTransferError::InvalidDataStream);
     }
