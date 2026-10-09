@@ -286,7 +286,17 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
         tokio::select! {
             query = completion_rx.recv() => {
                 if let Some(query) = query {
-                    completion::resolve(query, &session, &root, &local_cwd, &remote_cwd).await;
+                    // Tab RPC 不能阻塞本机 Control accept loop，否则双方
+                    // 同时请求远端补全时可能互相等待。
+                    let session = Arc::clone(&session);
+                    let root = Arc::clone(&root);
+                    let local = local_cwd.clone();
+                    let remote = remote_cwd.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::time::timeout(Duration::from_secs(3),
+                            completion::resolve(query, &session, &root, &local, &remote)
+                        ).await;
+                    });
                 }
             }
             incoming = session.control().accept_bi() => {
