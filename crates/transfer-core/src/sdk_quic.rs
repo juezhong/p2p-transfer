@@ -16,6 +16,7 @@ use p2p_sdk::verified_session::VerifiedManualSession;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::{
+    lease::LeaseGuard,
     protocol::{FrameKind, Frame},
     rpc::{self, RpcRequest},
     secure_io::SharedRoot,
@@ -169,6 +170,10 @@ async fn read_data_preface(
     Ok(data)
 }
 
+/// Grants are retained for the entire remote batch. An Arc is shared by
+/// all concurrent Control RPC handlers on the authoritative creator.
+pub type RemoteLeaseGrant = std::sync::Arc<tokio::sync::Mutex<Option<LeaseGuard>>>;
+
 /// Dispatch one already accepted Control QUIC stream. This makes an ongoing
 /// Control session capable of answering directory and GET requests while a
 /// separate Data QUIC transport handles file payload.
@@ -177,6 +182,18 @@ pub async fn serve_control_stream(
     root: &SharedRoot,
     send: quinn::SendStream,
     recv: quinn::RecvStream,
+) -> Result<IncomingResult, SdkTransferError> {
+    serve_control_stream_with_lease(session, root, send, recv, None).await
+}
+
+/// Creator-side dispatcher enforces one remote transfer grant at a time.
+/// A regular responder retains the standard functionality with no arbiter.
+pub async fn serve_control_stream_with_lease(
+    session: &VerifiedManualSession,
+    root: &SharedRoot,
+    send: quinn::SendStream,
+    recv: quinn::RecvStream,
+    lease: Option<(&crate::lease::TransferLease, &RemoteLeaseGrant)>,
 ) -> Result<IncomingResult, SdkTransferError> {
     let mut control = ControlIo::new(recv, send);
     let first = read_frame(&mut control).await?;
@@ -191,6 +208,40 @@ pub async fn serve_control_stream(
             let request_id = first.request_id;
             let parsed = RpcRequest::decode(&first.payload);
             match parsed {
+                Ok(RpcRequest::AcquireTransfer) => {
+                    let granted = if request_id == 0 {
+                        false
+                    } else if let Some((arbiter, remote_grant)) = lease {
+                        let mut guard = remote_grant.lock().await;
+                        if guard.is_some() {
+                            false
+                        } else if let Ok(token) = arbiter.try_acquire(request_id) {
+                            *guard = Some(token);
+                            true
+                        } else { false }
+                    } else { false };
+                    if granted {
+                        write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
+                    } else {
+                        write_frame(&mut control, FrameKind::Error, request_id, b"busy".to_vec()).await?;
+                    }
+                    Ok(IncomingResult::DirectoryListed)
+                }
+                Ok(RpcRequest::ReleaseTransfer) => {
+                    let released = if let Some((_, remote_grant)) = lease {
+                        let mut guard = remote_grant.lock().await;
+                        if guard.as_ref().map(LeaseGuard::request_id) == Some(request_id) {
+                            *guard = None;
+                            true
+                        } else { false }
+                    } else { false };
+                    if released {
+                        write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
+                    } else {
+                        write_frame(&mut control, FrameKind::Error, request_id, b"unknown lease".to_vec()).await?;
+                    }
+                    Ok(IncomingResult::DirectoryListed)
+                }
                 Ok(RpcRequest::List { directory }) => {
                     match rpc::list_in_root(root, &directory)
                         .and_then(|names| rpc::encode_listing(&names))
@@ -316,5 +367,27 @@ pub async fn mkdir_via_sdk(
     if response.payload.as_slice() != b"OK" {
         return Err(SdkTransferError::InvalidDataStream);
     }
+    Ok(())
+}
+
+/// Joiner must obtain a server-authoritative grant before an entire PUT/GET
+/// batch, not once per individual file. This uses Control QUIC only.
+pub async fn acquire_transfer_via_sdk(
+    session: &VerifiedManualSession,
+    id: u64,
+) -> Result<(), SdkTransferError> {
+    if id == 0 { return Err(SdkTransferError::InvalidDataStream); }
+    let result = request_rpc(session, RpcRequest::AcquireTransfer, id).await?;
+    if result.payload != b"OK" { return Err(SdkTransferError::InvalidDataStream); }
+    Ok(())
+}
+
+pub async fn release_transfer_via_sdk(
+    session: &VerifiedManualSession,
+    id: u64,
+) -> Result<(), SdkTransferError> {
+    if id == 0 { return Err(SdkTransferError::InvalidDataStream); }
+    let result = request_rpc(session, RpcRequest::ReleaseTransfer, id).await?;
+    if result.payload != b"OK" { return Err(SdkTransferError::InvalidDataStream); }
     Ok(())
 }
