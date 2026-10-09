@@ -145,3 +145,9 @@
 - [PR #14](https://github.com/juezhong/p2p-transfer/pull/14) squash `937b4ae`：cap-std 安全受限递归清单、深度/条目上限和安全 mkdir，五平台 Actions success。
 - [PR #15](https://github.com/juezhong/p2p-transfer/pull/15) squash `d081269`：[Rust CI #37936828907](https://github.com/juezhong/p2p-transfer/actions/runs/37936828907) 与 [五平台 Debug/双进程测试 #37936828883](https://github.com/juezhong/p2p-transfer/actions/runs/37936828883) 均 success。Control QUIC 目录类型 / mkdir RPC，Data QUIC 逐文件传输；CLI 的目录 PUT/GET 可遍历多层结构、保留空目录和 Unicode，GET 每文件等待实际校验提交，回归单文件测试修正正常的目录探测拒绝处理。
 - 当前仍**不符合旧 Go v0.16.4 完整功能对等**：远程可靠 CANCEL、双方 lease 仲裁、Data QUIC 断后重建与未确认块重传、最多四条 Data QUIC、高负载/2GiB 跨平台基准、Tab 补全、SDK NAT consent/restart/端口映射和公网双机手测尚未完成。按用户要求继续优先 CLI/SDK；TUI/GUI 暂缓，不创建冒充完成的正式 Release。
+
+## M3 会话传输租约基础（2026-10-09 功能分支待 CI）
+
+- 新增 `transfer-core::lease::TransferLease` 的 RAII 独占任务 lease；同一会话本地不可有两个独立活动的文件任务，异步取消会 Drop 并释放 lease；目录/状态 RPC 不必独占 Data QUIC。增加并发争用、异常取消、重新获得租约的自动化测试。
+- **没有宣称跨设备租约仲裁完成**：此模块仅是本地构件，下一步要在认证的 Control QUIC 上实现双端申请/授予/释放与并发冲突一致决策，随后整合到 send/receive/GET、目录批次以及真正远端取消；没接入前 CLI 仍存在 A/B 同时发起的竞态风险。
+- 其他主要未完成：未确认块的重传、Data QUIC 恢复、最多四条独立 Data QUIC、Tab 补全、ICE consent/restart/网关端口映射、完整性能验收。稳定 Release 继续暂缓；TUI/GUI 依用户要求后置。
