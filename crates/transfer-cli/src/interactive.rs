@@ -4,10 +4,9 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use p2p_sdk::{
-    ice_gather::gather,
-    ice_multi::nominate_direct_candidates,
     ice_signaling::IceRole,
-    local_network::default_bind_address,
+    local_network::local_addresses,
+    multi_interface::{gather_interfaces, MAX_ACTIVE_INTERFACES},
     manual_ice_v2,
     manual_pairing::ManualPairing,
     peer_pin::ManualConfirmation,
@@ -49,7 +48,7 @@ fn verify_user(pairing: &ManualPairing) -> CliResult<ManualConfirmation> {
     Ok(confirmation)
 }
 
-async fn default_stun(ipv4: bool) -> Vec<SocketAddr> {
+async fn default_stun() -> Vec<SocketAddr> {
     if std::env::var_os("P2P_TRANSFER_STUN").as_deref() == Some(std::ffi::OsStr::new("off")) {
         return Vec::new();
     }
@@ -61,9 +60,12 @@ async fn default_stun(ipv4: bool) -> Vec<SocketAddr> {
         if let Ok(Ok(resolved)) = tokio::time::timeout(
             Duration::from_secs(2), tokio::net::lookup_host(hostname)
         ).await {
-            if let Some(server) = resolved.into_iter().find(|addr| addr.is_ipv4() == ipv4)
-            {
-                if !servers.contains(&server) { servers.push(server); }
+            // Discover both IP families; each bound UDP Owner will probe
+            // only a STUN endpoint of its own address family.
+            for family in [true, false] {
+                if let Some(server) = resolved.clone().find(|addr| addr.is_ipv4() == family) {
+                    if !servers.contains(&server) { servers.push(server); }
+                }
             }
         }
     }
@@ -97,32 +99,39 @@ pub async fn run() -> CliResult<()> {
         return Err("未授权目录；会话未建立".into());
     }
     let root = Arc::new(SharedRoot::authorize(&dir).map_err(debug_error)?);
-    let bind = default_bind_address()
-        .map_err(|err| format!("无法自动找到适合的本机网络接口：{err}"))?;
-    println!("自动选择本机 UDP 接口 {}（无需手动填写 IP 或端口）", bind.ip());
-    let stun = default_stun(bind.is_ipv4()).await;
-    println!("STUN 探测服务器数量：{}（仅用于候选收集；局域网不依赖公网服务器）", stun.len());
+    let interfaces = local_addresses()
+        .map_err(|err| format!("无法枚举本机网络接口：{err}"))?;
+    if interfaces.is_empty() {
+        return Err("没有可用的 IPv4/IPv6 网络接口".into());
+    }
+    let addresses: Vec<SocketAddr> = interfaces.into_iter()
+        .take(MAX_ACTIVE_INTERFACES)
+        .map(|ip| SocketAddr::new(ip, 0)).collect();
+    println!("自动收集 {} 个本机 IPv4/IPv6 UDP 接口，无需手工填写 IP 或端口",
+        addresses.len());
+    let stun = default_stun().await;
+    println!("STUN 探测服务器数量：{}（仅用于候选收集；局域网不依赖公网服务器）",
+        stun.len());
 
     let peer = if mode == 1 {
-        create_connection(bind, &stun).await?
+        create_connection(&addresses, &stun).await?
     } else {
-        join_connection(bind, &stun).await?
+        join_connection(&addresses, &stun).await?
     };
     println!("已建立安全 P2P 连接。输入 help 查看命令；Ctrl-C 可请求取消活动任务。");
     crate::shell::run(peer, root).await
 }
 
 async fn create_connection(
-    bind: SocketAddr, stun: &[SocketAddr],
+    addresses: &[SocketAddr], stun: &[SocketAddr],
 ) -> CliResult<ActivePeer> {
     let identity = rcgen::generate_simple_self_signed(vec!["client.local".into()])
         .map_err(debug_error)?;
     let certificate = identity.cert.der().clone();
-    let mut owner = UdpOwner::bind(bind).await.map_err(debug_error)?;
-    let local = owner.handle.local_address();
-    let offer = gather(
-        &owner.handle, stun, IceRole::Controlling, Duration::from_secs(3)
-    ).await.map_err(debug_error)?.description;
+    let gathered = gather_interfaces(
+        addresses, stun, IceRole::Controlling, Duration::from_secs(3),
+    ).await.map_err(debug_error)?;
+    let offer = gathered.combined.clone();
     let (pending, code) = manual_ice_v2::invite_with_certificate(
         now_secs()?, 1200, certificate.as_ref(), &offer,
     ).map_err(debug_error)?;
@@ -131,9 +140,11 @@ async fn create_connection(
     let (pairing, remote, remote_cert) =
         pending.finish_with_certificate(&reply, now_secs()?).map_err(debug_error)?;
     let confirmation = verify_user(&pairing)?;
-    let nominated = nominate_direct_candidates(
-        &mut owner, &offer, &remote, Duration::from_secs(30),
-    ).await.map_err(debug_error)?;
+    let selected = gathered.nominate_first(&remote, Duration::from_secs(30))
+        .await.map_err(debug_error)?;
+    let mut owner = selected.owner;
+    let nominated = selected.path;
+    let local = owner.handle.local_address();
     println!("直连 ICE 提名：{} → {}，不使用服务器中继", nominated.local, nominated.remote);
     let tls = authenticated_client_config(
         vec![certificate], rustls::pki_types::PrivateKeyDer::Pkcs8(
@@ -165,28 +176,29 @@ async fn create_connection(
 }
 
 async fn join_connection(
-    bind: SocketAddr, stun: &[SocketAddr],
+    addresses: &[SocketAddr], stun: &[SocketAddr],
 ) -> CliResult<ActivePeer> {
     let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()])
         .map_err(debug_error)?;
     let certificate = identity.cert.der().clone();
-    let mut owner = UdpOwner::bind(bind).await.map_err(debug_error)?;
-    let local = owner.handle.local_address();
     let code = prompt("请粘贴创建方发送的 INVITE 邀请码：")?;
     let _ = manual_ice_v2::inspect_invite_with_certificate(&code, now_secs()?)
         .map_err(debug_error)?;
-    let answer = gather(
-        &owner.handle, stun, IceRole::Controlled, Duration::from_secs(3),
-    ).await.map_err(debug_error)?.description;
+    let gathered = gather_interfaces(
+        addresses, stun, IceRole::Controlled, Duration::from_secs(3),
+    ).await.map_err(debug_error)?;
+    let answer = gathered.combined.clone();
     let (reply, pairing, remote, remote_cert) =
         manual_ice_v2::respond_with_certificate(
             &code, now_secs()?, certificate.as_ref(), &answer,
         ).map_err(debug_error)?;
     println!("把下面的 REPLY 回传码私下发给创建方：\n{reply}");
     let confirmation = verify_user(&pairing)?;
-    let nominated = nominate_direct_candidates(
-        &mut owner, &answer, &remote, Duration::from_secs(30),
-    ).await.map_err(debug_error)?;
+    let selected = gathered.nominate_first(&remote, Duration::from_secs(30))
+        .await.map_err(debug_error)?;
+    let mut owner = selected.owner;
+    let nominated = selected.path;
+    let local = owner.handle.local_address();
     println!("直连 ICE 提名：{} → {}，不使用服务器中继", nominated.local, nominated.remote);
     let tls = authenticated_server_config(
         vec![certificate], rustls::pki_types::PrivateKeyDer::Pkcs8(
