@@ -1,0 +1,27 @@
+name: Rust checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: 自动格式化 Rust 源码
+        run: cargo fmt --all
+      - name: 检查格式化后的结果
+        run: |
+          cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: 单元测试
+        run: cargo test --workspace
