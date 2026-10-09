@@ -30,22 +30,37 @@ pub struct Task {
 
 impl Task {
     pub fn new(id: TaskId, total_bytes: u64) -> Self {
-        Self { id, phase: TaskPhase::Pending, total_bytes, written_bytes: 0 }
+        Self {
+            id,
+            phase: TaskPhase::Pending,
+            total_bytes,
+            written_bytes: 0,
+        }
     }
 
-    pub fn phase(&self) -> TaskPhase { self.phase }
-    pub fn total_bytes(&self) -> u64 { self.total_bytes }
-    pub fn written_bytes(&self) -> u64 { self.written_bytes }
+    pub fn phase(&self) -> TaskPhase {
+        self.phase
+    }
+    pub fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+    pub fn written_bytes(&self) -> u64 {
+        self.written_bytes
+    }
 
     pub fn start(&mut self) -> Result<(), TaskError> {
-        if self.phase != TaskPhase::Pending { return Err(TaskError::InvalidTransition); }
+        if self.phase != TaskPhase::Pending {
+            return Err(TaskError::InvalidTransition);
+        }
         self.phase = TaskPhase::Running;
         Ok(())
     }
 
     /// Represents contiguous bytes written by the receiver, not fsync durability.
     pub fn acknowledge_written(&mut self, next_offset: u64) -> Result<(), TaskError> {
-        if self.phase != TaskPhase::Running { return Err(TaskError::InvalidTransition); }
+        if self.phase != TaskPhase::Running {
+            return Err(TaskError::InvalidTransition);
+        }
         if next_offset < self.written_bytes || next_offset > self.total_bytes {
             return Err(TaskError::InvalidProgress);
         }
@@ -63,13 +78,18 @@ impl Task {
 
     /// Call only after successful content hash verification and file commit.
     pub fn complete(&mut self) -> Result<(), TaskError> {
-        if self.phase != TaskPhase::Verifying { return Err(TaskError::InvalidTransition); }
+        if self.phase != TaskPhase::Verifying {
+            return Err(TaskError::InvalidTransition);
+        }
         self.phase = TaskPhase::Completed;
         Ok(())
     }
 
     pub fn cancel(&mut self) -> Result<(), TaskError> {
-        if matches!(self.phase, TaskPhase::Completed | TaskPhase::Cancelled | TaskPhase::Failed) {
+        if matches!(
+            self.phase,
+            TaskPhase::Completed | TaskPhase::Cancelled | TaskPhase::Failed
+        ) {
             return Err(TaskError::AlreadyTerminal);
         }
         self.phase = TaskPhase::Cancelled;
@@ -77,7 +97,10 @@ impl Task {
     }
 
     pub fn fail(&mut self) -> Result<(), TaskError> {
-        if matches!(self.phase, TaskPhase::Completed | TaskPhase::Cancelled | TaskPhase::Failed) {
+        if matches!(
+            self.phase,
+            TaskPhase::Completed | TaskPhase::Cancelled | TaskPhase::Failed
+        ) {
             return Err(TaskError::AlreadyTerminal);
         }
         self.phase = TaskPhase::Failed;
@@ -107,7 +130,10 @@ mod tests {
         task.start().unwrap();
         task.acknowledge_written(5).unwrap();
         assert_eq!(task.acknowledge_written(4), Err(TaskError::InvalidProgress));
-        assert_eq!(task.acknowledge_written(11), Err(TaskError::InvalidProgress));
+        assert_eq!(
+            task.acknowledge_written(11),
+            Err(TaskError::InvalidProgress)
+        );
         assert_eq!(task.written_bytes(), 5);
     }
 
