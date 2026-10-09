@@ -13,6 +13,7 @@ use std::{
 };
 
 use tokio::{sync::{mpsc, oneshot, Mutex}, task::JoinHandle};
+use rustyline::{Editor, error::ReadlineError, history::DefaultHistory};
 use transfer_core::{
     lease::TransferLease,
     recursive::{gather_directory, ManifestEntry},
@@ -21,13 +22,13 @@ use transfer_core::{
     secure_io::SharedRoot,
 };
 
-use crate::{interactive::ActivePeer, CliResult};
+use crate::{completion::{self, CompletionQuery, ShellCompleter}, interactive::ActivePeer, CliResult};
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
-fn next_id() -> u64 { NEXT_REQUEST.fetch_add(1, Ordering::Relaxed) }
+pub(crate) fn next_id() -> u64 { NEXT_REQUEST.fetch_add(1, Ordering::Relaxed) }
 
-fn root_relative(base: &Path, input: &str) -> CliResult<PathBuf> {
+pub(crate) fn root_relative(base: &Path, input: &str) -> CliResult<PathBuf> {
     let mut components: Vec<_> = base.components()
         .filter_map(|part| match part { Component::Normal(name) => Some(name.to_os_string()), _ => None })
         .collect();
@@ -47,7 +48,7 @@ fn root_relative(base: &Path, input: &str) -> CliResult<PathBuf> {
     Ok(components.iter().collect())
 }
 
-fn relative_string(path: &Path) -> CliResult<String> {
+pub(crate) fn relative_string(path: &Path) -> CliResult<String> {
     path.to_str().map(str::to_owned).ok_or_else(|| "当前协议不支持非 UTF-8 路径".into())
 }
 
@@ -60,15 +61,44 @@ fn help() {
     println!("实验限制：目录递归已接入；尚不支持断点续传及真正的远程取消协议。");
 }
 
-fn input_thread(tx: mpsc::UnboundedSender<String>) {
-    thread::spawn(move || loop {
-        let line = crate::prompt("p2p> ");
-        let Ok(line) = line else {
-            let _ = tx.send("quit".into());
-            break;
-        };
-        if tx.send(line).is_err() { break; }
+/// The next prompt is displayed only after the current command was printed.
+/// The OS thread waits independently of the Tokio Control/Data session.
+fn input_thread(
+    tx: mpsc::UnboundedSender<String>,
+    ready: std::sync::mpsc::Receiver<()>,
+    completions: mpsc::UnboundedSender<CompletionQuery>,
+) {
+    thread::spawn(move || {
+        let mut editor = Editor::<ShellCompleter, DefaultHistory>::new().ok();
+        if let Some(line_editor) = editor.as_mut() {
+            line_editor.set_helper(Some(ShellCompleter { requests: completions }));
+        }
+        loop {
+            let line = if let Some(line_editor) = editor.as_mut() {
+                match line_editor.readline("p2p> ") {
+                    Ok(line) => {
+                        if !line.trim().is_empty() {
+                            let _ = line_editor.add_history_entry(line.as_str());
+                        }
+                        line
+                    }
+                    Err(ReadlineError::Interrupted) => "cancel".to_owned(),
+                    Err(_) => "quit".to_owned(),
+                }
+            } else {
+                match crate::prompt("p2p> ") {
+                    Ok(line) => line,
+                    Err(_) => "quit".to_owned(),
+                }
+            };
+            if tx.send(line).is_err() || ready.recv().is_err() { break; }
+        }
     });
+}
+
+struct PromptReady(std::sync::mpsc::Sender<()>);
+impl Drop for PromptReady {
+    fn drop(&mut self) { let _ = self.0.send(()); }
 }
 
 
@@ -236,7 +266,9 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let is_creator = peer.role == "创建方";
     let pending_downloads: PendingDownloads = Arc::new(Mutex::new(HashMap::new()));
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    input_thread(tx);
+    let (prompt_ready, ready_rx) = std::sync::mpsc::channel();
+    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+    input_thread(tx, ready_rx, completion_tx);
     help();
     let mut local_cwd = PathBuf::new();
     let mut remote_cwd = PathBuf::new();
@@ -247,6 +279,11 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
 
     loop {
         tokio::select! {
+            query = completion_rx.recv() => {
+                if let Some(query) = query {
+                    completion::resolve(query, &session, &root, &local_cwd, &remote_cwd).await;
+                }
+            }
             incoming = session.control().accept_bi() => {
                 match incoming {
                     Ok((send, recv)) => {
@@ -275,10 +312,17 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             }
                         });
                     }
-                    Err(_) => return Err("Control QUIC 连接已断开".into()),
+                    Err(_) => {
+                        return Err(format!(
+                            "Control QUIC 连接已断开：{:?}；Data QUIC 状态：{:?}",
+                            session.control().close_reason(),
+                            session.data().close_reason(),
+                        ));
+                    },
                 }
             }
             input = rx.recv() => {
+                let _prompt_ready = PromptReady(prompt_ready.clone());
                 let Some(line) = input else { return Ok(()); };
                 let args = match shell_words::split(&line) {
                     Ok(args) => args,
