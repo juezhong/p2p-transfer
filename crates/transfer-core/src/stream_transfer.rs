@@ -89,7 +89,7 @@ impl Offer {
     }
 }
 
-async fn write_frame<W: AsyncWrite + Unpin>(
+pub async fn write_frame<W: AsyncWrite + Unpin>(
     to: &mut W,
     kind: FrameKind,
     request_id: u64,
@@ -101,7 +101,7 @@ async fn write_frame<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-async fn read_frame<R: AsyncRead + Unpin>(from: &mut R) -> Result<Frame, TransferError> {
+pub async fn read_frame<R: AsyncRead + Unpin>(from: &mut R) -> Result<Frame, TransferError> {
     let mut header = [0u8; HEADER_LEN];
     from.read_exact(&mut header).await?;
     if header[..4] != MAGIC { return Err(TransferError::Protocol("invalid frame magic")); }
@@ -202,6 +202,22 @@ where
     D: AsyncRead + Unpin,
 {
     let frame = read_frame(control).await?;
+    receive_file_after_offer(frame, control, data, root).await
+}
+
+/// Receive a transfer after a control-plane dispatcher has read and verified
+/// the first bounded Frame. This allows one session to handle both file
+/// offers and directory/GET RPC without consuming the wrong stream.
+pub async fn receive_file_after_offer<C, D>(
+    frame: Frame,
+    control: &mut C,
+    data: &mut D,
+    root: &SharedRoot,
+) -> Result<TransferReceipt, TransferError>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    D: AsyncRead + Unpin,
+{
     if frame.kind != FrameKind::TransferControl {
         return Err(TransferError::Protocol("expected transfer offer"));
     }

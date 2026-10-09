@@ -16,8 +16,13 @@ use p2p_sdk::verified_session::VerifiedManualSession;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::{
+    protocol::{FrameKind, Frame},
+    rpc::{self, RpcRequest},
     secure_io::SharedRoot,
-    stream_transfer::{receive_file, send_file, TransferError, TransferReceipt},
+    stream_transfer::{
+        read_frame, receive_file, receive_file_after_offer, send_file,
+        write_frame, TransferError, TransferReceipt,
+    },
 };
 
 const DATA_PREFACE: [u8; 4] = *b"P2PD";
@@ -143,4 +148,123 @@ mod tests {
         control.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"world");
     }
+}
+
+
+#[derive(Debug)]
+pub enum IncomingResult {
+    Received(TransferReceipt),
+    ServedGet(TransferReceipt),
+    DirectoryListed,
+}
+
+async fn read_data_preface(
+    session: &VerifiedManualSession,
+) -> Result<quinn::RecvStream, SdkTransferError> {
+    let mut data = session.data().accept_uni().await
+        .map_err(|_| SdkTransferError::DataConnection)?;
+    let mut preface = [0u8; DATA_PREFACE.len()];
+    AsyncReadExt::read_exact(&mut data, &mut preface).await?;
+    if preface != DATA_PREFACE { return Err(SdkTransferError::InvalidDataStream); }
+    Ok(data)
+}
+
+/// Dispatch one already accepted Control QUIC stream. This makes an ongoing
+/// Control session capable of answering directory and GET requests while a
+/// separate Data QUIC transport handles file payload.
+pub async fn serve_control_stream(
+    session: &VerifiedManualSession,
+    root: &SharedRoot,
+    send: quinn::SendStream,
+    recv: quinn::RecvStream,
+) -> Result<IncomingResult, SdkTransferError> {
+    let mut control = ControlIo::new(recv, send);
+    let first = read_frame(&mut control).await?;
+    match first.kind {
+        FrameKind::TransferControl => {
+            let mut data = read_data_preface(session).await?;
+            Ok(IncomingResult::Received(
+                receive_file_after_offer(first, &mut control, &mut data, root).await?
+            ))
+        }
+        FrameKind::RpcRequest => {
+            let request_id = first.request_id;
+            let parsed = RpcRequest::decode(&first.payload);
+            match parsed {
+                Ok(RpcRequest::List { directory }) => {
+                    match rpc::list_in_root(root, &directory)
+                        .and_then(|names| rpc::encode_listing(&names))
+                    {
+                        Ok(body) => {
+                            write_frame(&mut control, FrameKind::RpcResponse, request_id, body).await?;
+                            Ok(IncomingResult::DirectoryListed)
+                        }
+                        Err(_) => {
+                            write_frame(&mut control, FrameKind::Error, request_id, b"listing denied".to_vec()).await?;
+                            Err(SdkTransferError::InvalidDataStream)
+                        }
+                    }
+                }
+                Ok(RpcRequest::Get { source, destination }) => {
+                    if rpc::authorize_get(root, &source).is_err() {
+                        write_frame(&mut control, FrameKind::Error, request_id, b"file denied".to_vec()).await?;
+                        return Err(SdkTransferError::InvalidDataStream);
+                    }
+                    write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
+                    Ok(IncomingResult::ServedGet(
+                        send_via_sdk(session, root, Path::new(&source), &destination, request_id).await?
+                    ))
+                }
+                Err(_) => {
+                    write_frame(&mut control, FrameKind::Error, request_id, b"invalid RPC".to_vec()).await?;
+                    Err(SdkTransferError::InvalidDataStream)
+                }
+            }
+        }
+        _ => Err(SdkTransferError::InvalidDataStream),
+    }
+}
+
+async fn request_rpc(
+    session: &VerifiedManualSession,
+    request: RpcRequest,
+    request_id: u64,
+) -> Result<Frame, SdkTransferError> {
+    let (send, recv) = session.control().open_bi().await
+        .map_err(|_| SdkTransferError::ControlConnection)?;
+    let mut io = ControlIo::new(recv, send);
+    let payload = request.encode().map_err(|_| SdkTransferError::InvalidDataStream)?;
+    write_frame(&mut io, FrameKind::RpcRequest, request_id, payload).await?;
+    let response = read_frame(&mut io).await?;
+    if response.request_id != request_id { return Err(SdkTransferError::InvalidDataStream); }
+    if response.kind == FrameKind::Error { return Err(SdkTransferError::Transfer(TransferError::RemoteRejected)); }
+    if response.kind != FrameKind::RpcResponse { return Err(SdkTransferError::InvalidDataStream); }
+    Ok(response)
+}
+
+/// Remote ls/cd's directory probe: never reveals any path outside the
+/// explicitly authorized root on the remote peer.
+pub async fn list_via_sdk(
+    session: &VerifiedManualSession,
+    directory: String,
+    request_id: u64,
+) -> Result<Vec<String>, SdkTransferError> {
+    let response = request_rpc(session, RpcRequest::List { directory }, request_id).await?;
+    rpc::decode_listing(&response.payload).map_err(|_| SdkTransferError::InvalidDataStream)
+}
+
+/// Ask the other authenticated peer to send one named file back. The incoming
+/// file then arrives on a NEW separate Control/Data stream pair, handled by
+/// serve_control_stream() in the local session's incoming accept loop.
+pub async fn request_get_via_sdk(
+    session: &VerifiedManualSession,
+    source: String,
+    destination: String,
+    request_id: u64,
+) -> Result<(), SdkTransferError> {
+    let response = request_rpc(session, RpcRequest::Get { source, destination }, request_id).await?;
+    if response.payload.as_slice() != b"OK" {
+        return Err(SdkTransferError::InvalidDataStream);
+    }
+    Ok(())
 }

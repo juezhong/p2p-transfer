@@ -13,3 +13,5 @@ pub mod secure_io;
 pub mod stream_transfer;
 
 pub mod sdk_quic;
+
+pub mod rpc;

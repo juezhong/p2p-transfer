@@ -105,3 +105,10 @@
 - **现在可以进行实验性质的双机 LAN 手工测试**，参见 [docs/MANUAL_TEST_PREVIEW.md](MANUAL_TEST_PREVIEW.md)；同网段测试通过后才尝试 STUN/跨 NAT。未得到用户真实 LAN/NAT 结果，不能宣称公网 NAT 打洞已验证。
 - **仍未完成 Go v0.16.4 等价功能**：远端目录浏览、主动 GET、文件夹递归、多文件批量、滑动窗口/重传恢复、Data QUIC 断后自动重连、取消和任务 lease、TUI/GUI。当前单文件一在途块，不适合性能评估；CLI 为实验版，不是稳定 Release。
 - 下一批开发需优先接入远端目录及 GET、滑动窗口 ACK/重传和故障恢复、更多自动化安全测试；SDK 还需 consent freshness、ICE restart、PCP/NAT-PMP/UPnP、多网卡与实际跨 NAT 优化，保持直连无 relay。两份长期设计 PR 不合并。
+
+## M3 跨双 QUIC 的目录 RPC 与双向 GET（功能 PR 待 CI，2026-10-09）
+
+- 新增 Transfer 专用有界 RPC：远端目录列表及 GET 请求，保留 Unicode 路径；通过 SDK VerifiedManualSession 的 Control QUIC 请求和响应，文件内容仍仅走 Data QUIC。
+- 新增对 Control Stream 首帧的安全分派：文件 PUT offer 或目录/GET RPC，允许一条连接进行多次请求；GET 通过**反向独立 Data QUIC** 将文件写入发起方已授权的目录。
+- 真实 SDK 手动 ICE v2 + mTLS localhost 集成测试扩展为 PUT→LS→GET→双方磁盘字节相同。CI 绿之前不视为验收完成。
+- 还缺 Go 式交互 CLI、递归传输、取消/抢占、滑动窗口、恢复及公网 NAT 手测；不创建正式 Release。长期记录 PR #1 不合并。
