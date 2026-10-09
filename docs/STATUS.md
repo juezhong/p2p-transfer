@@ -163,3 +163,9 @@
 - [Transfer PR #17](https://github.com/juezhong/p2p-transfer/pull/17) squash 合并 `714987a7c17e6fb7df74d58fab50448faa4a08c4`。同一 head `aff7f8ee` 的 [Rust Checks #37940115425](https://github.com/juezhong/p2p-transfer/actions/runs/37940115425) 和 [五平台 Debug #37940115560](https://github.com/juezhong/p2p-transfer/actions/runs/37940115560) 均 success。通过认证 Control QUIC 的 AcquireTransfer/ReleaseTransfer RPC 和创建方控制的本地/远端独占 lease；已有取消先于 Acquire 到达的 tombstone 处理。
 - **安全与故障恢复尚未完成**：低层服务端 `serve_control_stream_with_lease` 的 PUT `TransferControl` 及 GET 流程仍须增加强制 lease ownership 验证，不能认为任意认证远端都无法绕过仲裁；租约断线 TTL/撤销及真正远程 CANCEL 也未补齐。
 - Go 式无参菜单、双向文件与目录递归、4MiB 应用 ACK 基线已经位于 main，但尚缺 Data QUIC 断线重建、未确认重传、最多四条可验证路径、Tab 补全、PCP/NAT-PMP/UPnP、ICE consent/restart、性能及真实跨 NAT 双机验收。TUI/GUI 依用户指示后置。**未出稳定版**；继续从 Transfer 仓库按五目标打包，SDK 维持纯 Rust 库。
+
+## 与 Go 完全一致的无参数用户入口（2026-10-09 功能 PR 待验证）
+
+- 删除早期验证用途的 `p2p-transfer send/receive <IP> <路径>` 参数入口、相关旧测试，将无参数 Go 风格「创建/加入→配对→持续命令行」作为唯一文件业务入口；保留 `--help`、`--version`、`help/version` 选项。不让用户提供地址/端口，网卡与候选选择均由 SDK 负责。
+- 新增进程级 help/version/旧式参数拒绝测试；真正两个无参数 CLI 进程的 PUT/GET/目录递归回归测试仍在。完整重写 `docs/MANUAL_TEST_PREVIEW.md` 及根 README，不再用 send/receive 示例误导用户。
+- TUI/GUI 依用户意愿延后；**未完成** SDK 网关自动发现/续期/UPnP、ICE consent/restart、Data QUIC 重连未确认块重传、最多 4 data-only lanes、Tab 完整补全、2GiB 五平台性能测试和跨 NAT 实机验证；在这些功能和验收完成前不应正式发布稳定版。
