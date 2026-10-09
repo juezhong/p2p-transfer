@@ -130,3 +130,10 @@
 - `transfer-core::recursive` 新增有界（100000 项、64 层、最大 4096 UTF-8 名字）目录遍历，使用 `SharedRoot` capability-based 目录/文件句柄，保留 Unicode 文件名、空目录、文件大小，拒绝路径逃逸、不可读项、链接越界；测试含混合树和 symlink。
 - 这仍只是递归清单模块，没有与网络 PUT/GET 目录分批及远端 mkdir RPC 整合，不能宣称用户已经能递归传目录。
 - 下一步真正目录批次协议、目的端安全 mkdir 与逐文件 SHA 提交、取消和传输任务锁；之后继续数据面重传/故障恢复。TUI/GUI 暂缓；发布条件不变。
+
+## M3 目录递归网络 PUT/GET（功能分支测试中）
+
+- 受限递归清单和 `SharedRoot::create_directory` 已经由 [#14](https://github.com/juezhong/p2p-transfer/pull/14) 通过五平台 CI 并合并（`937b4ae`）。
+- 此分支新增 RPC `ListTypes`（远端条目文件/目录类型）与 `MakeDirectory`（cap-std 受限建目录），并连接 CLI `put/get`：递归 PUT 按清单逐目录/文件发送；递归 GET 使用类型化列表逐层请求，等待**每个文件真正写盘和 SHA-256 提交**后才进入下一文件。仍保留独立 Control/Data QUIC。
+- 新增真正两个无参数 CLI 进程的目录 PUT→GET 自动测试，覆盖 Unicode、嵌套目录、空目录及 SHA-256 数据一致。以最新 CI 与五平台测试为准；**真实公网 NAT 还没验证**。
+- 尚缺故障后的重传/数据面恢复、完整单会话跨端任务仲裁、可靠远端取消、Tab 补全、PCP/NAT-PMP/UPnP、SDK consent/restart。暂不发布正式版本，TUI/GUI 延后。

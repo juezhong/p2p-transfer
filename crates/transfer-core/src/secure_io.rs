@@ -81,6 +81,33 @@ impl SharedRoot {
         Ok(names)
     }
 
+    /// Enumerate entry names and file types without following symlinks.
+    /// Reject unsupported/symlink entries rather than pretending a directory
+    /// tree is complete when it is not.
+    pub fn list_entry_kinds(
+        &self,
+        relative: Option<&Path>,
+    ) -> Result<Vec<(OsString, bool)>, FileAccessError> {
+        let dir = match relative {
+            None => self.root.open_dir(".").map_err(io_error)?,
+            Some(path) => {
+                clean_relative(path)?;
+                self.root.open_dir(path).map_err(io_error)?
+            }
+        };
+        let mut entries = Vec::new();
+        for entry in dir.entries().map_err(io_error)? {
+            let entry = entry.map_err(io_error)?;
+            let ty = entry.file_type().map_err(io_error)?;
+            if !ty.is_dir() && !ty.is_file() {
+                return Err(FileAccessError::Io);
+            }
+            entries.push((entry.file_name(), ty.is_dir()));
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(entries)
+    }
+
     /// Create a destination directory beneath the explicitly authorized root.
     /// A remote request must first be authorized by the session's file
     /// sharing policy; this cannot be used to create outside the root.
@@ -252,6 +279,17 @@ mod tests {
         sink.append(b"ab").unwrap();
         assert_eq!(sink.verify_and_commit([0; 32]), Err(FileAccessError::ChecksumMismatch));
         assert!(!location.join("check.bin").exists());
+        drop(root);
+        std::fs::remove_dir_all(location).unwrap();
+    }
+
+    #[test]
+    fn lists_file_types_without_symlink_following() {
+        let (location, root) = fixture();
+        std::fs::write(location.join("plain.txt"), b"file").unwrap();
+        let listed = root.list_entry_kinds(None).unwrap();
+        assert!(listed.contains(&(OsString::from("plain.txt"), false)));
+        assert!(listed.contains(&(OsString::from("子目录"), true)));
         drop(root);
         std::fs::remove_dir_all(location).unwrap();
     }

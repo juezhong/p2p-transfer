@@ -55,11 +55,13 @@ fn fixture() -> (PathBuf, PathBuf, PathBuf) {
 }
 
 #[test]
-fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
+fn recursive_put_get_across_two_real_cli_processes() {
     let exe = env!("CARGO_BIN_EXE_p2p-transfer");
     let (base, a_root, b_root) = fixture();
     let content = "Rust 控制面和数据面严格分开！".repeat(12_000);
-    fs::write(a_root.join("原始.txt"), content.as_bytes()).unwrap();
+    fs::create_dir_all(a_root.join("数据/子目录/空")).unwrap();
+    fs::write(a_root.join("数据/子目录/原始.txt"), content.as_bytes()).unwrap();
+    fs::write(a_root.join("数据/root.bin"), b"other").unwrap();
     let (tx, rx) = mpsc::channel::<(Peer, String)>();
     let mut a = launch(exe, &a_root, Peer::Creator, tx.clone());
     let mut b = launch(exe, &b_root, Peer::Joiner, tx);
@@ -79,7 +81,7 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
     let mut get_sent = false;
     let mut get_done = false;
     let mut transcript = Vec::new();
-    let end = Instant::now() + Duration::from_secs(75);
+    let end = Instant::now() + Duration::from_secs(100);
     while !get_done {
         let remaining = end.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -121,17 +123,17 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
             ready[if peer == Peer::Creator { 0 } else { 1 }] = true;
         }
         if ready.iter().all(|x| *x) && !put_sent {
-            enter(&mut a, "put 原始.txt 收到.txt");
+            enter(&mut a, "put 数据 拷贝");
             put_sent = true;
         }
         if put_sent && !get_sent && peer == Peer::Creator
             && line.contains("[PUT] 文件或目录任务完成")
         {
-            enter(&mut a, "ls");
-            enter(&mut a, "get 收到.txt 回传.txt");
+            enter(&mut a, "ls 拷贝");
+            enter(&mut a, "get 拷贝 回传");
             get_sent = true;
         }
-        if get_sent && peer == Peer::Creator && line.contains("[文件] 已接收并验证") {
+        if get_sent && peer == Peer::Creator && line.contains("[GET] 文件或目录任务全部校验提交") {
             get_done = true;
         }
         if line.contains("失败：") || line.contains("Transfer failed:") {
@@ -149,7 +151,11 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
     enter(&mut b, "quit");
     assert!(a.wait().unwrap().success());
     assert!(b.wait().unwrap().success());
-    assert_eq!(fs::read(b_root.join("收到.txt")).unwrap(), content.as_bytes());
-    assert_eq!(fs::read(a_root.join("回传.txt")).unwrap(), content.as_bytes());
+    assert_eq!(fs::read(b_root.join("拷贝/子目录/原始.txt")).unwrap(), content.as_bytes());
+    assert_eq!(fs::read(a_root.join("回传/子目录/原始.txt")).unwrap(), content.as_bytes());
+    assert_eq!(fs::read(b_root.join("拷贝/root.bin")).unwrap(), b"other");
+    assert_eq!(fs::read(a_root.join("回传/root.bin")).unwrap(), b"other");
+    assert!(b_root.join("拷贝/子目录/空").is_dir());
+    assert!(a_root.join("回传/子目录/空").is_dir());
     fs::remove_dir_all(base).unwrap();
 }
