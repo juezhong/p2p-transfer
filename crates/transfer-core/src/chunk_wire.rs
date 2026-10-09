@@ -137,7 +137,8 @@ mod tests {
         let (mut writer, mut reader) = duplex(128);
         assert_eq!(write_chunk(&mut writer, 4, 0, total, &[3, 4]).await,
             Err(ChunkWireError::InvalidLength));
-        assert_eq!(reader.read_u8().await.is_err(), true);
+        drop(writer);
+        assert!(reader.read_u8().await.is_err());
     }
 
     #[tokio::test]
