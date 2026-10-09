@@ -21,3 +21,5 @@ pub mod recursive;
 pub mod lease;
 
 pub mod chunk_reassembly;
+
+pub mod chunk_wire;
