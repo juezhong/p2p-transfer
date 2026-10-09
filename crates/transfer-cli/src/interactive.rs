@@ -48,11 +48,7 @@ async fn default_stun(ipv4: bool) -> Vec<SocketAddr> {
     }
     // These public servers see the UDP source IP of the STUN query. STUN
     // is optional; an offline LAN may still work without DNS or Internet.
-    let hosts = if ipv4 {
-        ["stun.l.google.com:19302", "stun1.l.google.com:19302"]
-    } else {
-        ["stun.l.google.com:19302", "stun1.l.google.com:19302"]
-    };
+    let hosts = ["stun.l.google.com:19302", "stun1.l.google.com:19302"];
     let mut servers = Vec::new();
     for hostname in hosts {
         if let Ok(Ok(resolved)) = tokio::time::timeout(
