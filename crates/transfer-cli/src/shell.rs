@@ -123,8 +123,17 @@ async fn get_one_file(
     source: &Path,
     destination: &Path,
     pending: &PendingDownloads,
+    grant: &RemoteLeaseGrant,
+    is_creator: bool,
 ) -> CliResult<()> {
     let id = next_id();
+    // 创建方 GET 的回传必须匹配已登记请求，任务取消即撤销授权。
+    let _expected_get = if is_creator {
+        Some(grant.lock().await.expect_local_get(id)
+            .ok_or("GET 请求授权失败或 ID 重复")?)
+    } else {
+        None
+    };
     let (done_tx, done_rx) = oneshot::channel();
     pending.lock().await.insert(id, done_tx);
     if let Err(err) = request_get_via_sdk(
@@ -155,10 +164,12 @@ async fn get_path(
     source: &Path,
     destination: &Path,
     pending: &PendingDownloads,
+    grant: &RemoteLeaseGrant,
+    is_creator: bool,
 ) -> CliResult<()> {
     let initial = list_typed_via_sdk(session, relative_string(source)?, next_id()).await;
     let Ok(first) = initial else {
-        return get_one_file(session, source, destination, pending).await;
+        return get_one_file(session, source, destination, pending, grant, is_creator).await;
     };
     let mut todo = VecDeque::from([(source.to_path_buf(), destination.to_path_buf(), first, 0usize)]);
     let mut count = 0usize;
@@ -176,7 +187,7 @@ async fn get_path(
                 ).await.map_err(|e| format!("{e:?}"))?;
                 todo.push_back((remote_path, local_path, children, depth + 1));
             } else {
-                get_one_file(session, &remote_path, &local_path, pending).await?;
+                get_one_file(session, &remote_path, &local_path, pending, grant, is_creator).await?;
                 println!("[GET] {}: 完成并校验", local_path.display());
             }
         }
@@ -361,6 +372,7 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let session = Arc::clone(&session);
                         let root = Arc::clone(&root);
                         let pending = Arc::clone(&pending_downloads);
+                        let grant = Arc::clone(&remote_grant);
                         let activity = Arc::clone(&active);
                         let lease = arbiter.clone();
                         let batch_id = next_id();
@@ -368,7 +380,7 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         task = Some(tokio::spawn(async move {
                             let result = with_batch_lease(&session, &lease, is_creator, batch_id,
                                 get_path(&session, &root, Path::new(&source),
-                                    Path::new(&destination), &pending)).await;
+                                    Path::new(&destination), &pending, &grant, is_creator)).await;
                             match result {
                                 Ok(()) => println!("\n[GET] 文件或目录任务全部校验提交"),
                                 Err(err) => eprintln!("\n[GET] 失败：{err}"),

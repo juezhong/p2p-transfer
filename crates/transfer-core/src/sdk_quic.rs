@@ -6,11 +6,12 @@
 //! until multiplexed request-ID scheduling and repair are implemented.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     io,
     path::Path,
     pin::Pin,
     task::{Context, Poll},
+    sync::{Arc, Mutex},
 };
 
 use p2p_sdk::verified_session::VerifiedManualSession;
@@ -181,11 +182,49 @@ async fn read_data_preface(
 pub struct RemoteLeaseState {
     active: Option<LeaseGuard>,
     canceled: VecDeque<u64>,
+    expected_local_gets: Arc<Mutex<HashSet<u64>>>,
+}
+
+/// A pending locally initiated GET authorizes only its own response ID.
+/// Dropping the task guard revokes access even on Ctrl-C or async abort.
+pub struct ExpectedLocalGet {
+    request_id: u64,
+    pending: Arc<Mutex<HashSet<u64>>>,
+}
+
+impl Drop for ExpectedLocalGet {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.request_id);
+        }
+    }
 }
 
 pub type RemoteLeaseGrant = std::sync::Arc<tokio::sync::Mutex<RemoteLeaseState>>;
 
 impl RemoteLeaseState {
+    /// Register before sending a GET RPC so its response cannot race us.
+    /// The returned RAII guard must live until verification or cancellation.
+    pub fn expect_local_get(&self, request_id: u64) -> Option<ExpectedLocalGet> {
+        if request_id == 0 {
+            return None;
+        }
+        let mut pending = self.expected_local_gets.lock().ok()?;
+        if !pending.insert(request_id) {
+            return None;
+        }
+        Some(ExpectedLocalGet {
+            request_id,
+            pending: Arc::clone(&self.expected_local_gets),
+        })
+    }
+
+    fn permits_local_get(&self, request_id: u64) -> bool {
+        self.expected_local_gets.lock()
+            .map(|pending| pending.contains(&request_id))
+            .unwrap_or(false)
+    }
+
     fn permits_inbound_file(&self) -> bool {
         self.active.is_some()
     }
@@ -221,14 +260,16 @@ impl RemoteLeaseState {
 }
 
 /// The creator can receive a peer's PUT under a remote grant OR receive
-/// the peer's data response to its own GET under its local lease.
-/// TODO: bind the specific data request ID to its initiating GET/PUT lease
-/// before claiming full protection against a malicious authenticated peer.
+/// the peer's data response to a locally initiated GET with a matching
+/// outstanding request ID. A local lease alone must never authorize an
+/// unrelated inbound PUT. Remote batch grants still need per-file binding.
 fn inbound_file_authorized(
     arbiter: &crate::lease::TransferLease,
     remote: &RemoteLeaseState,
+    request_id: u64,
 ) -> bool {
-    remote.permits_inbound_file() || arbiter.active_request().is_some()
+    remote.permits_inbound_file()
+        || (arbiter.active_request().is_some() && remote.permits_local_get(request_id))
 }
 
 /// Dispatch one already accepted Control QUIC stream. This makes an ongoing
@@ -260,12 +301,10 @@ pub async fn serve_control_stream_with_lease(
             // even if the peer passed TLS/session authentication. A matching
             // transfer lease is an additional application authorization gate.
             if let Some((arbiter, grants)) = lease {
-                // Incoming DATA can also be the authorized response to a
-                // locally initiated GET: the creator then holds the LOCAL
-                // lease, not a remote grant. Future request-ID binding will
-                // distinguish it from unsolicited payload more precisely.
+                // Incoming DATA may answer an outstanding creator GET.
+                // A local lease without a matching request ID is not enough.
                 let authorized = inbound_file_authorized(
-                    arbiter, &*grants.lock().await,
+                    arbiter, &*grants.lock().await, first.request_id,
                 );
                 if !authorized {
                     write_frame(
@@ -481,11 +520,32 @@ mod transfer_lease_rpc_tests {
     fn creator_may_receive_its_own_get_reply_without_remote_grant() {
         let lease = crate::lease::TransferLease::new();
         let remote = RemoteLeaseState::default();
-        assert!(!inbound_file_authorized(&lease, &remote));
+        assert!(!inbound_file_authorized(&lease, &remote, 77));
         let local = lease.try_acquire(77).unwrap();
-        assert!(inbound_file_authorized(&lease, &remote));
+        assert!(!inbound_file_authorized(&lease, &remote, 77));
+        let expected = remote.expect_local_get(77).unwrap();
+        assert!(inbound_file_authorized(&lease, &remote, 77));
+        assert!(!inbound_file_authorized(&lease, &remote, 78));
+        drop(expected);
+        assert!(!inbound_file_authorized(&lease, &remote, 77));
+        let expected = remote.expect_local_get(77).unwrap();
         drop(local);
-        assert!(!inbound_file_authorized(&lease, &remote));
+        assert!(!inbound_file_authorized(&lease, &remote, 77));
+        drop(expected);
+    }
+
+    #[test]
+    fn local_get_permit_is_unique_and_revoked_on_drop() {
+        let remote = RemoteLeaseState::default();
+        assert!(remote.expect_local_get(0).is_none());
+        let first = remote.expect_local_get(12).unwrap();
+        assert!(remote.expect_local_get(12).is_none());
+        assert!(remote.permits_local_get(12));
+        drop(first);
+        assert!(!remote.permits_local_get(12));
+        let second = remote.expect_local_get(12).unwrap();
+        drop(second);
+        assert!(!remote.permits_local_get(12));
     }
 
     #[test]
