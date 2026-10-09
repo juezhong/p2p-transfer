@@ -1,6 +1,6 @@
 [package]
 name = "transfer-cli"
-version = "0.1.0-test.2"
+version = "0.1.0-test.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
