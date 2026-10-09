@@ -8,7 +8,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::{Component, Path, PathBuf},
     time::Duration,
-    sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc},
+    sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc, Mutex as StdMutex},
     thread,
 };
 
@@ -67,6 +67,7 @@ fn input_thread(
     tx: mpsc::UnboundedSender<String>,
     ready: std::sync::mpsc::Receiver<()>,
     completions: mpsc::UnboundedSender<CompletionQuery>,
+    prompt_label: Arc<StdMutex<String>>,
 ) {
     thread::spawn(move || {
         let mut editor = Editor::<ShellCompleter, DefaultHistory>::new().ok();
@@ -74,8 +75,10 @@ fn input_thread(
             line_editor.set_helper(Some(ShellCompleter { requests: completions }));
         }
         loop {
+            let label = prompt_label.lock().map(|p| p.clone())
+                .unwrap_or_else(|_| "p2p> ".to_owned());
             let line = if let Some(line_editor) = editor.as_mut() {
-                match line_editor.readline("p2p> ") {
+                match line_editor.readline(&label) {
                     Ok(line) => {
                         if !line.trim().is_empty() {
                             let _ = line_editor.add_history_entry(line.as_str());
@@ -86,7 +89,7 @@ fn input_thread(
                     Err(_) => "quit".to_owned(),
                 }
             } else {
-                match crate::prompt("p2p> ") {
+                match crate::prompt(&label) {
                     Ok(line) => line,
                     Err(_) => "quit".to_owned(),
                 }
@@ -268,7 +271,8 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let (prompt_ready, ready_rx) = std::sync::mpsc::channel();
     let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
-    input_thread(tx, ready_rx, completion_tx);
+    let prompt_label = Arc::new(StdMutex::new("p2p[remote:/]> ".to_owned()));
+    input_thread(tx, ready_rx, completion_tx, Arc::clone(&prompt_label));
     help();
     let mut local_cwd = PathBuf::new();
     let mut remote_cwd = PathBuf::new();
@@ -373,7 +377,12 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let path = if args[1] == "-" { previous_remote.clone() }
                             else { root_relative(&remote_cwd, &args[1])? };
                         match list_via_sdk(&session, relative_string(&path)?, next_id()).await {
-                            Ok(_) => { previous_remote = std::mem::replace(&mut remote_cwd, path); }
+                            Ok(_) => {
+                                previous_remote = std::mem::replace(&mut remote_cwd, path);
+                                if let Ok(mut prompt) = prompt_label.lock() {
+                                    *prompt = format!("p2p[remote:/{}]> ", remote_cwd.display());
+                                }
+                            }
                             Err(err) => println!("[CD] {err:?}"),
                         }
                     }
