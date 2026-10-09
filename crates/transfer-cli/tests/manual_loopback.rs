@@ -8,7 +8,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Sender},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -74,7 +74,7 @@ fn two_cli_processes_exchange_codes_and_transfer_a_real_file_over_ice_quic() {
     let (base, source, receiver) = temp_fixture();
     let payload = "hello from verified QUIC: 文件 ✅".repeat(10_000);
     fs::write(source.join("原始.txt"), payload.as_bytes()).unwrap();
-    let (tx, rx): (Sender<(Side, String)>, Receiver<(Side, String)>) = mpsc::channel();
+    let (tx, rx) = mpsc::channel::<(Side, String)>();
 
     let mut recv = launch(
         exe, &["receive", "127.0.0.1:0", receiver.to_str().unwrap()],
