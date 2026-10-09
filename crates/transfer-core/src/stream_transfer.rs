@@ -21,6 +21,7 @@ use crate::{
 };
 
 const CHUNK: usize = 128 * 1024;
+const WINDOW_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 1024;
 const OFFER_FIXED: usize = 8 + 32 + 2;
 
@@ -125,6 +126,25 @@ fn expect_ack(frame: Frame, request_id: u64, expected: u64) -> Result<(), Transf
     Ok(())
 }
 
+/// Accept only a strictly advancing cumulative disk-written ACK bounded
+/// by data actually sent on the QUIC data channel, not a QUIC write receipt.
+fn cumulative_ack(
+    frame: Frame, request_id: u64, previous: u64, sent: u64,
+) -> Result<u64, TransferError> {
+    if frame.request_id != request_id {
+        return Err(TransferError::Protocol("wrong request ID"));
+    }
+    if frame.kind == FrameKind::Error { return Err(TransferError::RemoteRejected); }
+    if frame.kind != FrameKind::Ack || frame.payload.len() != 8 {
+        return Err(TransferError::Protocol("invalid cumulative ACK"));
+    }
+    let offset = u64::from_be_bytes(frame.payload.try_into().unwrap());
+    if offset <= previous || offset > sent {
+        return Err(TransferError::Protocol("invalid cumulative ACK offset"));
+    }
+    Ok(offset)
+}
+
 /// Send one explicitly authorized local file over a dedicated data stream,
 /// receiving disk-write ACKs over a distinct control stream.
 ///
@@ -161,17 +181,26 @@ where
     let mut file = root.open_read(source)?;
     let mut task = Task::new(TaskId(request_id), bytes);
     task.start().map_err(|_| TransferError::Protocol("task state error"))?;
+    // A bounded number of chunks may be in flight. Unlike stop-and-wait,
+    // a high-RTT path can keep sending while disk-written ACKs return on
+    // the independent Control QUIC. This is not yet retry/resume on reset.
     let mut sent = 0u64;
-    while sent < bytes {
-        let n = CHUNK.min((bytes - sent) as usize);
-        file.read_exact(&mut buf[..n])?;
-        data.write_all(&(n as u32).to_be_bytes()).await?;
-        data.write_all(&buf[..n]).await?;
+    let mut acknowledged = 0u64;
+    while acknowledged < bytes {
+        while sent < bytes && sent - acknowledged < WINDOW_BYTES as u64 {
+            let available = (WINDOW_BYTES as u64 - (sent - acknowledged))
+                .min(CHUNK as u64)
+                .min(bytes - sent) as usize;
+            file.read_exact(&mut buf[..available])?;
+            data.write_all(&(available as u32).to_be_bytes()).await?;
+            data.write_all(&buf[..available]).await?;
+            sent += available as u64;
+        }
         data.flush().await?;
-        sent += n as u64;
-        expect_ack(read_frame(control).await?, request_id, sent)?;
-        task.acknowledge_written(sent)
+        let next = cumulative_ack(read_frame(control).await?, request_id, acknowledged, sent)?;
+        task.acknowledge_written(next)
             .map_err(|_| TransferError::Protocol("task acknowledgement failed"))?;
+        acknowledged = next;
     }
     // The receiver checks SHA, fsyncs, and atomically publishes before DONE.
     let final_frame = read_frame(control).await?;
