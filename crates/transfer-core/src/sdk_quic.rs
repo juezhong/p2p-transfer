@@ -241,6 +241,19 @@ pub async fn serve_control_stream_with_lease(
     let first = read_frame(&mut control).await?;
     match first.kind {
         FrameKind::TransferControl => {
+            // The authoritative creator must reject unsolicited file payload
+            // even if the peer passed TLS/session authentication. A matching
+            // transfer lease is an additional application authorization gate.
+            if let Some((_, grants)) = lease {
+                let authorized = grants.lock().await.active.is_some();
+                if !authorized {
+                    write_frame(
+                        &mut control, FrameKind::Error, first.request_id,
+                        b"transfer lease required".to_vec(),
+                    ).await?;
+                    return Err(SdkTransferError::InvalidDataStream);
+                }
+            }
             let mut data = read_data_preface(session).await?;
             Ok(IncomingResult::Received(
                 receive_file_after_offer(first, &mut control, &mut data, root).await?
@@ -320,6 +333,19 @@ pub async fn serve_control_stream_with_lease(
                     }
                 }
                 Ok(RpcRequest::Get { source, destination }) => {
+                    // Directory browsing is independent of the transfer
+                    // lease, but serving file DATA requires a live remote
+                    // grant on the authoritative creator.
+                    if let Some((_, grants)) = lease {
+                        let authorized = grants.lock().await.active.is_some();
+                        if !authorized {
+                            write_frame(
+                                &mut control, FrameKind::Error, request_id,
+                                b"transfer lease required".to_vec(),
+                            ).await?;
+                            return Err(SdkTransferError::InvalidDataStream);
+                        }
+                    }
                     if rpc::authorize_get(root, &source).is_err() {
                         write_frame(&mut control, FrameKind::Error, request_id, b"file denied".to_vec()).await?;
                         return Err(SdkTransferError::InvalidDataStream);
