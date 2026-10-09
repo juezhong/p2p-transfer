@@ -62,8 +62,9 @@ async fn default_stun() -> Vec<SocketAddr> {
         ).await {
             // Discover both IP families; each bound UDP Owner will probe
             // only a STUN endpoint of its own address family.
+            let resolved: Vec<_> = resolved.collect();
             for family in [true, false] {
-                if let Some(server) = resolved.clone().find(|addr| addr.is_ipv4() == family) {
+                if let Some(server) = resolved.iter().copied().find(|addr| addr.is_ipv4() == family) {
                     if !servers.contains(&server) { servers.push(server); }
                 }
             }
