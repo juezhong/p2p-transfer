@@ -19,3 +19,5 @@ pub mod rpc;
 pub mod recursive;
 
 pub mod lease;
+
+pub mod chunk_reassembly;
