@@ -163,3 +163,9 @@
 - [Transfer PR #17](https://github.com/juezhong/p2p-transfer/pull/17) squash 合并 `714987a7c17e6fb7df74d58fab50448faa4a08c4`。同一 head `aff7f8ee` 的 [Rust Checks #37940115425](https://github.com/juezhong/p2p-transfer/actions/runs/37940115425) 和 [五平台 Debug #37940115560](https://github.com/juezhong/p2p-transfer/actions/runs/37940115560) 均 success。通过认证 Control QUIC 的 AcquireTransfer/ReleaseTransfer RPC 和创建方控制的本地/远端独占 lease；已有取消先于 Acquire 到达的 tombstone 处理。
 - **安全与故障恢复尚未完成**：低层服务端 `serve_control_stream_with_lease` 的 PUT `TransferControl` 及 GET 流程仍须增加强制 lease ownership 验证，不能认为任意认证远端都无法绕过仲裁；租约断线 TTL/撤销及真正远程 CANCEL 也未补齐。
 - Go 式无参菜单、双向文件与目录递归、4MiB 应用 ACK 基线已经位于 main，但尚缺 Data QUIC 断线重建、未确认重传、最多四条可验证路径、Tab 补全、PCP/NAT-PMP/UPnP、ICE consent/restart、性能及真实跨 NAT 双机验收。TUI/GUI 依用户指示后置。**未出稳定版**；继续从 Transfer 仓库按五目标打包，SDK 维持纯 Rust 库。
+
+## M3 服务端入站文件租约强制检查（功能 PR）
+
+- 功能分支 `feat/m3-enforce-inbound-transfer-lease` 在**创建方权威 Control QUIC 入站分派**对 PUT TransferControl 和 GET RPC 执行 live remote grant 检查。未取得租约或取消释放后收到的文件请求必须返回 Error，不允许直接进入 Data QUIC 流。目录浏览仍可独立使用 Control RPC。
+- 新增单测：无 grant、授权后、错误 release、正确 release、旧 grant replay；以最新 CI 通过为验收依据。
+- 此阶段仍未完成 lease ID 与每个子文件 request ID 的强认证绑定；短暂控制流竞态、断连 lease TTL 回收与真正 CANCEL 应作为下一阶段重点，不能说所有恶意并发已完全解决。稳定版本继续暂缓。

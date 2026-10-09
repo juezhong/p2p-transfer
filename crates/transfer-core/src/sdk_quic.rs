@@ -186,6 +186,10 @@ pub struct RemoteLeaseState {
 pub type RemoteLeaseGrant = std::sync::Arc<tokio::sync::Mutex<RemoteLeaseState>>;
 
 impl RemoteLeaseState {
+    fn permits_inbound_file(&self) -> bool {
+        self.active.is_some()
+    }
+
     fn acquire(&mut self, arbiter: &crate::lease::TransferLease, id: u64) -> bool {
         if id == 0 || self.active.is_some() || self.canceled.contains(&id) {
             return false;
@@ -216,6 +220,17 @@ impl RemoteLeaseState {
     }
 }
 
+/// The creator can receive a peer's PUT under a remote grant OR receive
+/// the peer's data response to its own GET under its local lease.
+/// TODO: bind the specific data request ID to its initiating GET/PUT lease
+/// before claiming full protection against a malicious authenticated peer.
+fn inbound_file_authorized(
+    arbiter: &crate::lease::TransferLease,
+    remote: &RemoteLeaseState,
+) -> bool {
+    remote.permits_inbound_file() || arbiter.active_request().is_some()
+}
+
 /// Dispatch one already accepted Control QUIC stream. This makes an ongoing
 /// Control session capable of answering directory and GET requests while a
 /// separate Data QUIC transport handles file payload.
@@ -241,6 +256,25 @@ pub async fn serve_control_stream_with_lease(
     let first = read_frame(&mut control).await?;
     match first.kind {
         FrameKind::TransferControl => {
+            // The authoritative creator must reject unsolicited file payload
+            // even if the peer passed TLS/session authentication. A matching
+            // transfer lease is an additional application authorization gate.
+            if let Some((arbiter, grants)) = lease {
+                // Incoming DATA can also be the authorized response to a
+                // locally initiated GET: the creator then holds the LOCAL
+                // lease, not a remote grant. Future request-ID binding will
+                // distinguish it from unsolicited payload more precisely.
+                let authorized = inbound_file_authorized(
+                    arbiter, &*grants.lock().await,
+                );
+                if !authorized {
+                    write_frame(
+                        &mut control, FrameKind::Error, first.request_id,
+                        b"transfer lease required".to_vec(),
+                    ).await?;
+                    return Err(SdkTransferError::InvalidDataStream);
+                }
+            }
             let mut data = read_data_preface(session).await?;
             Ok(IncomingResult::Received(
                 receive_file_after_offer(first, &mut control, &mut data, root).await?
@@ -320,6 +354,19 @@ pub async fn serve_control_stream_with_lease(
                     }
                 }
                 Ok(RpcRequest::Get { source, destination }) => {
+                    // Directory browsing is independent of the transfer
+                    // lease, but serving file DATA requires a live remote
+                    // grant on the authoritative creator.
+                    if let Some((_, grants)) = lease {
+                        let authorized = grants.lock().await.permits_inbound_file();
+                        if !authorized {
+                            write_frame(
+                                &mut control, FrameKind::Error, request_id,
+                                b"transfer lease required".to_vec(),
+                            ).await?;
+                            return Err(SdkTransferError::InvalidDataStream);
+                        }
+                    }
                     if rpc::authorize_get(root, &source).is_err() {
                         write_frame(&mut control, FrameKind::Error, request_id, b"file denied".to_vec()).await?;
                         return Err(SdkTransferError::InvalidDataStream);
@@ -429,6 +476,32 @@ pub async fn release_transfer_via_sdk(
 #[cfg(test)]
 mod transfer_lease_rpc_tests {
     use super::*;
+
+    #[test]
+    fn creator_may_receive_its_own_get_reply_without_remote_grant() {
+        let lease = crate::lease::TransferLease::new();
+        let remote = RemoteLeaseState::default();
+        assert!(!inbound_file_authorized(&lease, &remote));
+        let local = lease.try_acquire(77).unwrap();
+        assert!(inbound_file_authorized(&lease, &remote));
+        drop(local);
+        assert!(!inbound_file_authorized(&lease, &remote));
+    }
+
+    #[test]
+    fn inbound_put_get_require_live_remote_grant() {
+        let lease = crate::lease::TransferLease::new();
+        let mut remote = RemoteLeaseState::default();
+        assert!(!remote.permits_inbound_file());
+        assert!(remote.acquire(&lease, 41));
+        assert!(remote.permits_inbound_file());
+        assert!(!remote.release(42));
+        assert!(remote.permits_inbound_file());
+        assert!(remote.release(41));
+        assert!(!remote.permits_inbound_file());
+        assert!(!remote.acquire(&lease, 41)); // Released grant cannot be replayed.
+        assert!(!remote.permits_inbound_file());
+    }
 
     #[test]
     fn cancellation_before_acquire_prevents_stranded_grant() {
