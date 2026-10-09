@@ -21,7 +21,6 @@ jobs:
       - name: 检查格式化后的结果
         run: |
           cargo fmt --all -- --check
-          git diff --exit-code -- '*.rs'
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: 单元测试
