@@ -157,3 +157,9 @@
 - 添加 Transfer Control QUIC 专用 `AcquireTransfer`/`ReleaseTransfer` RPC。由创建连接一侧统一授予或拒绝独占 transfer lease；另一端发起的整个目录 PUT/GET 批次开始前必须先申请，结束或取消时释放。host 本地批次和 remote grant 共用同一个原子 TransferLease；目录列表、CD、status 仍与数据任务分开。
 - 客户端 `put/get` 不再仅依赖本端 AtomicBool：现在进一步通过已验证 Control QUIC 和权威方做跨端的任务争用判断。文件载荷仍只经 Data QUIC。
 - 当前还有待 CI 与真实竞态覆盖：恶意对端跳过申请绕过 RPC、租约释放消息丢失后的 TTL/重连回收、双方同时启动及 Ctrl-C 恢复测试。合并不能代替这些后续测试，仍不满足稳定 Release 条件。
+
+## M3 双端租约仲裁合并核查（2026-10-09）
+
+- [Transfer PR #17](https://github.com/juezhong/p2p-transfer/pull/17) squash 合并 `714987a7c17e6fb7df74d58fab50448faa4a08c4`。同一 head `aff7f8ee` 的 [Rust Checks #37940115425](https://github.com/juezhong/p2p-transfer/actions/runs/37940115425) 和 [五平台 Debug #37940115560](https://github.com/juezhong/p2p-transfer/actions/runs/37940115560) 均 success。通过认证 Control QUIC 的 AcquireTransfer/ReleaseTransfer RPC 和创建方控制的本地/远端独占 lease；已有取消先于 Acquire 到达的 tombstone 处理。
+- **安全与故障恢复尚未完成**：低层服务端 `serve_control_stream_with_lease` 的 PUT `TransferControl` 及 GET 流程仍须增加强制 lease ownership 验证，不能认为任意认证远端都无法绕过仲裁；租约断线 TTL/撤销及真正远程 CANCEL 也未补齐。
+- Go 式无参菜单、双向文件与目录递归、4MiB 应用 ACK 基线已经位于 main，但尚缺 Data QUIC 断线重建、未确认重传、最多四条可验证路径、Tab 补全、PCP/NAT-PMP/UPnP、ICE consent/restart、性能及真实跨 NAT 双机验收。TUI/GUI 依用户指示后置。**未出稳定版**；继续从 Transfer 仓库按五目标打包，SDK 维持纯 Rust 库。
