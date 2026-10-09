@@ -118,7 +118,7 @@ fn two_cli_processes_exchange_codes_and_transfer_a_real_file_over_ice_quic() {
             receiver_reply = Some(line.clone());
             send_line(&mut send, &line);
         }
-        if let Some(value) = line.strip_prefix("Your six-digit comparison code: ") {
+        if let Some((_, value)) = line.split_once("Your six-digit comparison code: ") {
             match side {
                 Side::Sender => sender_code = Some(value.trim().to_owned()),
                 Side::Receiver => receiver_code = Some(value.trim().to_owned()),
