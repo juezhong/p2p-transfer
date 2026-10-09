@@ -75,3 +75,9 @@
 - 新增接收 `.part` 随机唯一文件、顺序流式写入与已写字节 ACK、SHA-256 校验、文件 `sync_all`、同目录 hard-link 原子 no-clobber 发布和 Drop/取消清理；完全位于 Transfer Core，不涉及 SDK 网络栈。
 - Linux/Unix 单元测试包括 Unicode 文件、路径穿越、符号链接逃逸、拒绝覆盖、校验失败不发布。尚未完成真正文件 RPC/远端授权、递归传输、磁盘故障与中途断电恢复；文件句柄 fsync 不保证所有文件系统的目录元数据持久化。须等 CI 实际通过再记录完成。
 - 用户最终五平台 Debug/Release 由 Transfer 发布；SDK 不发布独立 Debug。
+
+## 用户验收与发行入口确定（2026-10-09）
+
+- 按用户决定，五平台最终 Debug/Release 全部由 Transfer 提供（Windows x86_64、macOS x86_64/aarch64、Linux x86_64/aarch64）；SDK 不单独分发 Debug。Transfer CLI 必须能够显示已认证 ICE 提名候选及 QUIC 连接诊断，让真实两机传文件同时验证 SDK。
+- SDK #20/#21/#22/#23 已合并且相关 CI 通过，但尚无真实公网 NAT 打洞证明；Transfer 现已有 Workspace/协议帧/授权目录/.part/SHA-256 基础，真正网络 PUT/GET、ACK/重传、可用 CLI/TUI/GUI 和跨平台发行仍待开发。
+- 优先并行推进 Transfer 协议/目录操作和 SDK 真实 Session 集成；第一个可发布用户测试版门槛是**两台机器安全配对、ICE 选路、独立控制数据 QUIC、实际传输并校验 SHA-256**。真实 NAT 环境要用户最终测试。进度优先评论长期记录 PR #1，不合并该 PR。
