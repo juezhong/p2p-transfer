@@ -118,3 +118,9 @@
 - [Transfer PR #9](https://github.com/juezhong/p2p-transfer/pull/9) 已通过最新 Rust Checks 与五平台 native Debug CI 并合并（`465003a`）：SDK 已认证 Control QUIC 上的远端 LIST / GET RPC，文件数据通过独立 Data QUIC 双向传输；真实 ICE/mTLS localhost PUT→LS→GET 测试通过。
 - 新功能分支 `feat/m3-go-style-interactive-cli` 将程序无参数启动转换成 Go 风格菜单「创建/加入/退出」，SDK 自动查找本机实际 IPv4/IPv6 网卡、自动 UDP 端口及可选 STUN，再提供持续命令 shell：pwd/ls/cd、lpwd/lls/lcd、put/get、status/cancel/quit；含跨两个真实无参数 CLI 进程的交互和 PUT/GET 测试。详见 docs/INTERACTIVE_CLI.md。**以最新 CI 结果为准，尚未自动完成。**
 - 与 Go 差异：必须确认共享根（默认 cwd），拒绝访问范围以外的绝对路径；单网卡 UDP Owner、文件不支持目录递归、无窗口/重传/恢复、cancel 仅初步本机中断、无 Tab 补全、未发布正式版本。五平台真实网络 NAT 穿透未验证。
+
+## 2026-10-09 交互 CLI 与 4MiB 窗口整合
+
+- [PR #11](https://github.com/juezhong/p2p-transfer/pull/11) 已通过 Rust checks 和五平台 Debug CI 合并，Go 风格无参数交互菜单、目录导航、PUT/GET、自动网卡候选。相比旧 Go，仍有限制共享根和缺少递归/Tab 等。
+- [PR #12](https://github.com/juezhong/p2p-transfer/pull/12) 旧 head 已通过 CI，但因为 #11 先合并而冲突，不能直接合并。现在在 [PR #13](https://github.com/juezhong/p2p-transfer/pull/13) 基于最新 main 重放带实际写盘累计 ACK 的 4MiB 有界窗口和测试。
+- 后续必须补足：目录递归、多文件、真正会话级取消/仲裁、断线重传/数据 QUIC 恢复、可选网关映射与公网 NAT 实测、CLI Tab 补全。TUI/GUI 按用户要求延后。**未达到 Go 功能等价和真实 NAT 手测验收前不创建用户正式 Release**。
