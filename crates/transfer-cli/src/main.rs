@@ -93,8 +93,25 @@ fn usage() {
         Never share pairing codes publicly: they include ICE credentials and IPs.");
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
+// Windows' default 1 MiB main thread stack is insufficient for the
+// combined ICE/QUIC handshake futures. Run the SDK on a dedicated thread
+// with an explicit 16 MiB stack, without changing security or I/O behavior.
+fn main() {
+    let worker = std::thread::Builder::new()
+        .name("p2p-transfer-network".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Tokio runtime initialization failed");
+            runtime.block_on(async_main());
+        })
+        .expect("cannot start Transfer network thread");
+    worker.join().expect("Transfer network thread panicked");
+}
+
+async fn async_main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let action = args.first().map(String::as_str);
     let result = match action {
