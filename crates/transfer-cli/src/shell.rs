@@ -57,6 +57,7 @@ fn help() {
     println!("本地目录：lpwd / lls [path] / lcd <path|->");
     println!("文件传输：put <local> [remote] / get <remote> [local]");
     println!("其他：status / cancel / help / quit");
+    println!("Tab：支持命令、本地和远端中文路径补全，带空格路径自动加引号。");
     println!("路径相对本次明确授权的目录根；路径中有空格请使用双引号。");
     println!("实验限制：目录递归已接入；尚不支持断点续传及真正的远程取消协议。");
 }
@@ -348,6 +349,8 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             if session.data().close_reason().is_none() { "connected" } else { "closed" },
                             peer.local_address, peer.peer_address);
                         println!("文件任务活动={}；本地共享根目录已授权", active.load(Ordering::SeqCst));
+                        println!("当前远端目录=/{}；当前本地相对目录=/{}",
+                            remote_cwd.display(), local_cwd.display());
                     }
                     "pwd" if args.len() == 1 => println!("/{}", remote_cwd.display()),
                     "lpwd" if args.len() == 1 => println!("/{}", local_cwd.display()),
