@@ -43,6 +43,9 @@ fn verify_user(pairing: &ManualPairing) -> CliResult<ManualConfirmation> {
 }
 
 async fn default_stun(ipv4: bool) -> Vec<SocketAddr> {
+    if std::env::var_os("P2P_TRANSFER_STUN").as_deref() == Some(std::ffi::OsStr::new("off")) {
+        return Vec::new();
+    }
     // These public servers see the UDP source IP of the STUN query. STUN
     // is optional; an offline LAN may still work without DNS or Internet.
     let hosts = if ipv4 {
