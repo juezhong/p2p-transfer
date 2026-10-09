@@ -35,10 +35,15 @@ fn verify_user(pairing: &ManualPairing) -> CliResult<ManualConfirmation> {
     let mut confirmation = ManualConfirmation::new(
         pairing.credentials.session_id(), pairing.comparison_code,
     ).map_err(debug_error)?;
-    println!("双方独立核对 6 位校验码：{}", confirmation.comparison_code_text());
-    let code = prompt("请输入经另一台设备独立核对确认的 6 位校验码：")?;
-    confirmation.confirm(&code)
-        .map_err(|_| "校验码不匹配，取消连接".to_owned())?;
+    println!("双方设备应显示相同的 6 位配对核对码：{}", confirmation.comparison_code_text());
+    println!("请通过另一可信渠道（例如语音）核对两台设备的数字是否一致。");
+    println!("这不是邀请码的一部分；它用来防止首次配对被第三方替换。");
+    let answer = prompt("已经与另一台设备核对且完全一致？输入 yes 继续，其余输入取消：")?;
+    if answer != "yes" {
+        return Err("用户没有确认双方配对核对码一致；拒绝建立连接".to_owned());
+    }
+    confirmation.confirm(&confirmation.comparison_code_text())
+        .map_err(|_| "配对核对未通过，取消连接".to_owned())?;
     Ok(confirmation)
 }
 
