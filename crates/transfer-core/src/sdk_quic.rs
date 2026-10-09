@@ -186,6 +186,10 @@ pub struct RemoteLeaseState {
 pub type RemoteLeaseGrant = std::sync::Arc<tokio::sync::Mutex<RemoteLeaseState>>;
 
 impl RemoteLeaseState {
+    fn permits_inbound_file(&self) -> bool {
+        self.active.is_some()
+    }
+
     fn acquire(&mut self, arbiter: &crate::lease::TransferLease, id: u64) -> bool {
         if id == 0 || self.active.is_some() || self.canceled.contains(&id) {
             return false;
@@ -245,7 +249,7 @@ pub async fn serve_control_stream_with_lease(
             // even if the peer passed TLS/session authentication. A matching
             // transfer lease is an additional application authorization gate.
             if let Some((_, grants)) = lease {
-                let authorized = grants.lock().await.active.is_some();
+                let authorized = grants.lock().await.permits_inbound_file();
                 if !authorized {
                     write_frame(
                         &mut control, FrameKind::Error, first.request_id,
@@ -337,7 +341,7 @@ pub async fn serve_control_stream_with_lease(
                     // lease, but serving file DATA requires a live remote
                     // grant on the authoritative creator.
                     if let Some((_, grants)) = lease {
-                        let authorized = grants.lock().await.active.is_some();
+                        let authorized = grants.lock().await.permits_inbound_file();
                         if !authorized {
                             write_frame(
                                 &mut control, FrameKind::Error, request_id,
@@ -455,6 +459,21 @@ pub async fn release_transfer_via_sdk(
 #[cfg(test)]
 mod transfer_lease_rpc_tests {
     use super::*;
+
+    #[test]
+    fn inbound_put_get_require_live_remote_grant() {
+        let lease = crate::lease::TransferLease::new();
+        let mut remote = RemoteLeaseState::default();
+        assert!(!remote.permits_inbound_file());
+        assert!(remote.acquire(&lease, 41));
+        assert!(remote.permits_inbound_file());
+        assert!(!remote.release(42));
+        assert!(remote.permits_inbound_file());
+        assert!(remote.release(41));
+        assert!(!remote.permits_inbound_file());
+        assert!(!remote.acquire(&lease, 41)); // Released grant cannot be replayed.
+        assert!(!remote.permits_inbound_file());
+    }
 
     #[test]
     fn cancellation_before_acquire_prevents_stranded_grant() {
