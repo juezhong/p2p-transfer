@@ -175,3 +175,10 @@
 - 原 [功能 PR #19](https://github.com/juezhong/p2p-transfer/pull/19) 在安全 PR #18 合并后产生冲突；本分支基于最新 main 重放仅 CLI 启动入口、README、测试文档及进程级 help/version/拒绝旧 send/receive 的测试；与 #18 服务端租约安全修复同时保留。
 - 保持唯一 `p2p-transfer` 无参数启动菜单，旧 `send/receive IP PATH` 只作为历史原型，不向最终用户暴露。真正 PUT/GET 在安全配对成功后的 Go 式交互 shell 执行。
 - Go 功能等价尚缺 Data QUIC 恢复/重传、最多四条 Data QUIC、Tab 补全、ICE consent/restart、PCP/NAT-PMP/UPnP、2GiB/真实跨 NAT 测试；TUI/GUI 按用户要求后置，未发行稳定版。
+
+## 2026-10-09 Go 式交互及租约安全批次已通过五平台 CI
+
+- [PR #17](https://github.com/juezhong/p2p-transfer/pull/17) 合并 `714987a7`：双端经过 Control QUIC 的任务 Acquire/Release 仲裁、取消先于 Acquire 的 tombstone；[Rust CI #37940115425](https://github.com/juezhong/p2p-transfer/actions/runs/37940115425) 与 [五平台 CI #37940115560](https://github.com/juezhong/p2p-transfer/actions/runs/37940115560) 成功。
+- [PR #18](https://github.com/juezhong/p2p-transfer/pull/18) 合并 `59f8de93`：创建方服务端强制限制无有效租约的入站 PUT/GET，合法的创建方 GET 文件回传可用本地租约通过；[Rust CI #37941727884](https://github.com/juezhong/p2p-transfer/actions/runs/37941727884) 与 [五平台 CI #37941727508](https://github.com/juezhong/p2p-transfer/actions/runs/37941727508) 成功。此前检测并修复了错误拒绝合法 GET 回传的回归。
+- [PR #20](https://github.com/juezhong/p2p-transfer/pull/20) 合并 `b5e1fb6d`：从最新 main 重放 Go 式**无任何必填启动参数**交互入口，保留 --help/--version，移除旧 send/receive 参数与测试；[Rust CI #37942622689](https://github.com/juezhong/p2p-transfer/actions/runs/37942622689) 和 [五平台 CI #37942622723](https://github.com/juezhong/p2p-transfer/actions/runs/37942622723) 成功。原有冲突的 PR #19 已关闭未合并。
+- **不等于完成**：尚须请求 ID 与具体租约绑定、防恶意配对端绕开仲裁、真正远端取消、Data QUIC 故障自动恢复和未确认分块重传、最多四条独立数据连接、Tab 路径补全、SDK consent/restart/PCP/NAT-PMP/UPnP/IPv6 与多网络验收、三平台 2GiB 基准。TUI/GUI 依用户要求暂缓；当前不创建稳定 Release。
