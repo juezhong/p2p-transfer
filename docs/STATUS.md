@@ -124,3 +124,9 @@
 - [PR #11](https://github.com/juezhong/p2p-transfer/pull/11) 已通过 Rust checks 和五平台 Debug CI 合并，Go 风格无参数交互菜单、目录导航、PUT/GET、自动网卡候选。相比旧 Go，仍有限制共享根和缺少递归/Tab 等。
 - [PR #12](https://github.com/juezhong/p2p-transfer/pull/12) 旧 head 已通过 CI，但因为 #11 先合并而冲突，不能直接合并。现在在 [PR #13](https://github.com/juezhong/p2p-transfer/pull/13) 基于最新 main 重放带实际写盘累计 ACK 的 4MiB 有界窗口和测试。
 - 后续必须补足：目录递归、多文件、真正会话级取消/仲裁、断线重传/数据 QUIC 恢复、可选网关映射与公网 NAT 实测、CLI Tab 补全。TUI/GUI 按用户要求延后。**未达到 Go 功能等价和真实 NAT 手测验收前不创建用户正式 Release**。
+
+## M3 安全目录递归清单（功能 PR 待 CI）
+
+- `transfer-core::recursive` 新增有界（100000 项、64 层、最大 4096 UTF-8 名字）目录遍历，使用 `SharedRoot` capability-based 目录/文件句柄，保留 Unicode 文件名、空目录、文件大小，拒绝路径逃逸、不可读项、链接越界；测试含混合树和 symlink。
+- 这仍只是递归清单模块，没有与网络 PUT/GET 目录分批及远端 mkdir RPC 整合，不能宣称用户已经能递归传目录。
+- 下一步真正目录批次协议、目的端安全 mkdir 与逐文件 SHA 提交、取消和传输任务锁；之后继续数据面重传/故障恢复。TUI/GUI 暂缓；发布条件不变。
