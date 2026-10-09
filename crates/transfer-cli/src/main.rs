@@ -1,6 +1,3 @@
-mod interactive;
-mod shell;
-
 //! Experimental manual direct P2P file transfer CLI.
 //!
 //! Both parties use one INVITE / one REPLY and separately verify their
@@ -8,6 +5,9 @@ mod shell;
 //! The SDK exclusively owns ICE, UDP, TLS and Control/Data QUIC connections.
 //! Not yet Go-parity: no recursive directory transfer, resume or multi-lane
 //! streaming windows. Do not call this a stable release.
+
+mod interactive;
+mod shell;
 
 use std::{
     env,
