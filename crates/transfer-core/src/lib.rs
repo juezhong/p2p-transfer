@@ -15,3 +15,5 @@ pub mod stream_transfer;
 pub mod sdk_quic;
 
 pub mod rpc;
+
+pub mod recursive;
