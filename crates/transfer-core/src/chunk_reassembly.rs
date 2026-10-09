@@ -226,7 +226,11 @@ mod tests {
         // A physically received chunk must not be acknowledged out of order.
         assert_eq!(recv.receive(0, vec![8; CHUNK_BYTES], |block| {
             bytes.extend_from_slice(block); Ok(bytes.len() as u64)
-        }), Err(ChunkError::DiskWrite));
+        }).unwrap(), total);
+        assert!(recv.is_complete());
+        assert_eq!(bytes.len() as u64, total);
+        assert_eq!(bytes[0], 8);
+        assert_eq!(bytes[CHUNK_BYTES], 9);
     }
 
     #[test]
