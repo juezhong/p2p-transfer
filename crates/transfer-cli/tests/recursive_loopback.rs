@@ -105,7 +105,7 @@ fn recursive_put_get_across_two_real_cli_processes() {
                 reply = true;
             }
         }
-        if let Some((_, code)) = line.split_once("双方独立核对 6 位校验码：") {
+        if let Some((_, code)) = line.split_once("双方设备应显示相同的 6 位配对核对码：") {
             match peer {
                 Peer::Creator => first_code = Some(code.trim().to_owned()),
                 Peer::Joiner => second_code = Some(code.trim().to_owned()),
@@ -114,8 +114,8 @@ fn recursive_put_get_across_two_real_cli_processes() {
         if let (Some(one), Some(two)) = (&first_code, &second_code) {
             if !confirmed {
                 assert_eq!(one, two, "ICE/manual TLS transcript comparison mismatch");
-                enter(&mut a, two);
-                enter(&mut b, one);
+                enter(&mut a, "yes");
+                enter(&mut b, "yes");
                 confirmed = true;
             }
         }
