@@ -18,11 +18,12 @@ use transfer_core::{
     lease::TransferLease,
     recursive::{gather_directory, ManifestEntry},
     rpc::list_in_root,
-    sdk_quic::{acquire_transfer_via_sdk, release_transfer_via_sdk, list_typed_via_sdk, list_via_sdk, mkdir_via_sdk, request_get_via_sdk, send_via_sdk, serve_control_stream_with_lease, IncomingResult, RemoteLeaseGrant},
+    sdk_quic::{acquire_transfer_via_sdk, release_transfer_via_sdk, list_typed_via_sdk, list_via_sdk, mkdir_via_sdk, request_get_via_sdk, send_via_managed_sdk, serve_control_stream_with_lease, IncomingResult, RemoteLeaseGrant},
     secure_io::SharedRoot,
 };
 
 use crate::{completion::{self, CompletionQuery, ShellCompleter}, interactive::ActivePeer, CliResult};
+use p2p_sdk::resilient_data::ResilientDataLanes;
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
@@ -113,6 +114,7 @@ type PendingDownloads = Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>>;
 /// with per-file SHA-256 and no-clobber commit.
 async fn put_path(
     session: &p2p_sdk::verified_session::VerifiedManualSession,
+    lanes: &ResilientDataLanes,
     root: &SharedRoot,
     source: &Path,
     destination: &Path,
@@ -134,8 +136,8 @@ async fn put_path(
                     mkdir_via_sdk(session, relative_string(&remote)?, next_id())
                         .await.map_err(|e| format!("{e:?}"))?;
                 } else {
-                    let receipt = send_via_sdk(
-                        session, root, path, &relative_string(&remote)?, next_id()
+                    let receipt = send_via_managed_sdk(
+                        session, lanes, root, path, &relative_string(&remote)?, next_id()
                     ).await.map_err(|e| format!("{e:?}"))?;
                     println!("[PUT] {}: {} 字节已校验提交", remote.display(), receipt.bytes);
                 }
@@ -143,8 +145,8 @@ async fn put_path(
             Ok(())
         }
         None => {
-            let receipt = send_via_sdk(
-                session, root, source, &relative_string(destination)?, next_id()
+            let receipt = send_via_managed_sdk(
+                session, lanes, root, source, &relative_string(destination)?, next_id()
             ).await.map_err(|e| format!("{e:?}"))?;
             println!("[PUT] {} 字节已由接收端校验并提交", receipt.bytes);
             Ok(())
@@ -264,6 +266,7 @@ where
 
 pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let session = Arc::clone(&peer.session);
+    let data_lanes = Arc::clone(&peer.data_lanes);
     let active = Arc::new(AtomicBool::new(false));
     let arbiter = TransferLease::new();
     let remote_grant: RemoteLeaseGrant = Arc::new(Mutex::new(Default::default()));
@@ -304,6 +307,7 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                     Ok((send, recv)) => {
                         let session = Arc::clone(&session);
                         let root = Arc::clone(&root);
+                        let lanes = Arc::clone(&data_lanes);
                         let pending = Arc::clone(&pending_downloads);
                         let arbiter = arbiter.clone();
                         let remote_grant = Arc::clone(&remote_grant);
@@ -312,7 +316,7 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             // a data task is running; the protocol dispatcher
                             // never passes file bytes on Control QUIC.
                             let auth = if is_creator { Some((&arbiter, &remote_grant)) } else { None };
-                            match serve_control_stream_with_lease(&session, &root, send, recv, auth).await {
+                            match serve_control_stream_with_lease(&session, &root, send, recv, auth, Some(&lanes)).await {
                                 Ok(IncomingResult::Received(receipt)) => {
                                     println!("\n[文件] 已接收并验证 {} 字节（SHA-256 OK）", receipt.bytes);
                                     if let Some(done) = pending.lock().await.remove(&receipt.request_id) {
@@ -347,13 +351,15 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                 let cmd = args[0].to_lowercase();
                 match cmd.as_str() {
                     "quit" | "exit" | "bye" => {
+                        data_lanes.shutdown().await;
                         session.control().close(0u32.into(), b"bye");
-                        session.data().close(0u32.into(), b"bye");
                         return Ok(());
                     }
                     "help" | "?" => help(),
                     "status" => {
-                        println!("角色={}；Control QUIC={}；Data QUIC={}；UDP {} -> {}",
+                        let actual = data_lanes.available().await.len();
+                        println!("已认证 Data QUIC 活跃连接：{}/4", actual);
+                        println!("角色={}；Control QUIC={}；基础 Data QUIC={}；UDP {} -> {}",
                             peer.role,
                             if session.control().close_reason().is_none() { "connected" } else { "closed" },
                             if session.data().close_reason().is_none() { "connected" } else { "closed" },
@@ -410,13 +416,14 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         }
                         let session = Arc::clone(&session);
                         let root = Arc::clone(&root);
+                        let lanes = Arc::clone(&data_lanes);
                         let activity = Arc::clone(&active);
                         let lease = arbiter.clone();
                         let batch_id = next_id();
                         active_batch_id = Some(batch_id);
                         task = Some(tokio::spawn(async move {
                             let result = with_batch_lease(&session, &lease, is_creator, batch_id,
-                                put_path(&session, &root, &source, &remote)).await;
+                                put_path(&session, &lanes, &root, &source, &remote)).await;
                             match result {
                                 Ok(()) => println!("\n[PUT] 文件或目录任务完成"),
                                 Err(err) => eprintln!("\n[PUT] 失败：{err}"),
