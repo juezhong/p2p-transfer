@@ -38,7 +38,7 @@ pub struct BoundedReassembly {
 
 impl BoundedReassembly {
     pub fn new(total: u64, memory_limit: usize) -> Result<Self, ChunkError> {
-        if memory_limit < CHUNK_BYTES || memory_limit > MAX_REORDER_BYTES
+        if !(CHUNK_BYTES..=MAX_REORDER_BYTES).contains(&memory_limit)
             || memory_limit % CHUNK_BYTES != 0
         {
             return Err(ChunkError::InvalidConfiguration);
@@ -115,7 +115,7 @@ pub struct ResendWindow {
 
 impl ResendWindow {
     pub fn new(total: u64, window_bytes: usize) -> Result<Self, ChunkError> {
-        if window_bytes < CHUNK_BYTES || window_bytes > MAX_REORDER_BYTES
+        if !(CHUNK_BYTES..=MAX_REORDER_BYTES).contains(&window_bytes)
             || window_bytes % CHUNK_BYTES != 0
         {
             return Err(ChunkError::InvalidConfiguration);
