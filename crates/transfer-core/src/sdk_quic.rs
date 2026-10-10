@@ -15,7 +15,51 @@ use std::{
     time::Duration,
 };
 
-use p2p_sdk::verified_session::VerifiedManualSession;
+use p2p_sdk::{
+    transport_session::ConnectedTransportPeer,
+    verified_session::VerifiedManualSession,
+};
+
+/// Only SDK-authenticated sessions may enter Transfer's Control RPC layer.
+/// This sealed trait does not permit arbitrary raw Quinn connections to
+/// bypass the SDK's mTLS certificate PIN + session HMAC checks.
+mod private {
+    use super::{Arc, ConnectedTransportPeer, VerifiedManualSession};
+    pub trait Sealed {}
+    impl Sealed for VerifiedManualSession {}
+    impl Sealed for ConnectedTransportPeer {}
+    impl<T: Sealed + ?Sized> Sealed for Arc<T> {}
+}
+
+/// Control is always required. The old dual-QUIC SDK session supplies its
+/// already-authenticated initial Data connection; the modern Control-only SDK
+/// session must use an explicitly authenticated Transfer-managed Data lane.
+/// This is a protocol boundary, NOT a raw Quinn Connection adapter.
+pub trait AuthenticatedSession: private::Sealed + Send + Sync {
+    fn control(&self) -> &quinn::Connection;
+    fn initial_data(&self) -> Option<&quinn::Connection>;
+}
+
+impl AuthenticatedSession for VerifiedManualSession {
+    fn control(&self) -> &quinn::Connection {
+        VerifiedManualSession::control(self)
+    }
+    fn initial_data(&self) -> Option<&quinn::Connection> {
+        Some(VerifiedManualSession::data(self))
+    }
+}
+
+impl AuthenticatedSession for ConnectedTransportPeer {
+    fn control(&self) -> &quinn::Connection { &self.control }
+    fn initial_data(&self) -> Option<&quinn::Connection> { None }
+}
+
+impl<T: AuthenticatedSession + ?Sized> AuthenticatedSession for Arc<T> {
+    fn control(&self) -> &quinn::Connection { T::control(self) }
+    fn initial_data(&self) -> Option<&quinn::Connection> {
+        T::initial_data(self)
+    }
+}
 use crate::data_lane_pool::ResilientDataLanes;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
@@ -106,7 +150,7 @@ impl<R: Unpin, W: AsyncWrite + Unpin> AsyncWrite for ControlIo<R, W> {
 /// uni-stream. The small magic prefix wakes the data acceptor BEFORE
 /// waiting for the first control ACK, avoiding an opening deadlock.
 pub async fn send_via_sdk(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     root: &SharedRoot,
     source: &Path,
     remote_destination: &str,
@@ -119,7 +163,7 @@ pub async fn send_via_sdk(
 /// SDK maintains the four QUIC connections and heals broken ones; Transfer
 /// still owns chunk ACK/retransmit and cannot yet resume an interrupted file.
 pub async fn send_via_managed_sdk(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     lanes: &ResilientDataLanes,
     root: &SharedRoot,
     source: &Path,
@@ -130,7 +174,7 @@ pub async fn send_via_managed_sdk(
 }
 
 async fn send_on_managed_lane(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     lanes: Option<&ResilientDataLanes>,
     root: &SharedRoot,
     source: &Path,
@@ -144,7 +188,8 @@ async fn send_on_managed_lane(
         pool.open_uni(Duration::from_secs(30)).await
             .map_err(|_| SdkTransferError::DataConnection)?
     } else {
-        session.data().open_uni().await.map_err(|_| SdkTransferError::DataConnection)?
+        session.initial_data().ok_or(SdkTransferError::DataConnection)?
+            .open_uni().await.map_err(|_| SdkTransferError::DataConnection)?
     };
     AsyncWriteExt::write_all(&mut data, &data_preface(request_id)).await
         .map_err(SdkTransferError::Io)?;
@@ -159,7 +204,7 @@ async fn send_on_managed_lane(
 /// Control/Data session. This revision supports one outstanding transfer;
 /// request-id routing and concurrent streams will follow.
 pub async fn receive_via_sdk(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     root: &SharedRoot,
 ) -> Result<TransferReceipt, SdkTransferError> {
     let (control_send, control_recv) = session.control().accept_bi().await
@@ -213,7 +258,7 @@ pub enum IncomingResult {
 }
 
 async fn read_data_preface(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     lanes: Option<&ResilientDataLanes>,
     request_id: u64,
 ) -> Result<quinn::RecvStream, SdkTransferError> {
@@ -221,7 +266,8 @@ async fn read_data_preface(
         pool.accept_uni(Duration::from_secs(120)).await
             .map_err(|_| SdkTransferError::DataConnection)?
     } else {
-        session.data().accept_uni().await.map_err(|_| SdkTransferError::DataConnection)?
+        session.initial_data().ok_or(SdkTransferError::DataConnection)?
+            .accept_uni().await.map_err(|_| SdkTransferError::DataConnection)?
     };
     let mut preface = [0u8; DATA_STREAM_ID_LEN];
     AsyncReadExt::read_exact(&mut data, &mut preface).await?;
@@ -337,7 +383,7 @@ fn inbound_file_authorized(
 /// Control session capable of answering directory and GET requests while a
 /// separate Data QUIC transport handles file payload.
 pub async fn serve_control_stream(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     root: &SharedRoot,
     send: quinn::SendStream,
     recv: quinn::RecvStream,
@@ -348,7 +394,7 @@ pub async fn serve_control_stream(
 /// Creator-side dispatcher enforces one remote transfer grant at a time.
 /// A regular responder retains the standard functionality with no arbiter.
 pub async fn serve_control_stream_with_lease(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     root: &SharedRoot,
     send: quinn::SendStream,
     recv: quinn::RecvStream,
@@ -488,7 +534,7 @@ pub async fn serve_control_stream_with_lease(
 }
 
 async fn request_rpc(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     request: RpcRequest,
     request_id: u64,
 ) -> Result<Frame, SdkTransferError> {
@@ -507,7 +553,7 @@ async fn request_rpc(
 /// Remote ls/cd's directory probe: never reveals any path outside the
 /// explicitly authorized root on the remote peer.
 pub async fn list_via_sdk(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     directory: String,
     request_id: u64,
 ) -> Result<Vec<String>, SdkTransferError> {
@@ -519,7 +565,7 @@ pub async fn list_via_sdk(
 /// file then arrives on a NEW separate Control/Data stream pair, handled by
 /// serve_control_stream() in the local session's incoming accept loop.
 pub async fn request_get_via_sdk(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     source: String,
     destination: String,
     request_id: u64,
@@ -532,7 +578,7 @@ pub async fn request_get_via_sdk(
 }
 
 pub async fn list_typed_via_sdk(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     directory: String,
     request_id: u64,
 ) -> Result<Vec<rpc::RemoteEntry>, SdkTransferError> {
@@ -541,7 +587,7 @@ pub async fn list_typed_via_sdk(
 }
 
 pub async fn mkdir_via_sdk(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     directory: String,
     request_id: u64,
 ) -> Result<(), SdkTransferError> {
@@ -555,7 +601,7 @@ pub async fn mkdir_via_sdk(
 /// Joiner must obtain a server-authoritative grant before an entire PUT/GET
 /// batch, not once per individual file. This uses Control QUIC only.
 pub async fn acquire_transfer_via_sdk(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     id: u64,
 ) -> Result<(), SdkTransferError> {
     if id == 0 { return Err(SdkTransferError::InvalidDataStream); }
@@ -565,7 +611,7 @@ pub async fn acquire_transfer_via_sdk(
 }
 
 pub async fn release_transfer_via_sdk(
-    session: &VerifiedManualSession,
+    session: &dyn AuthenticatedSession,
     id: u64,
 ) -> Result<(), SdkTransferError> {
     if id == 0 { return Err(SdkTransferError::InvalidDataStream); }

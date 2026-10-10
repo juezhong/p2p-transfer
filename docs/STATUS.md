@@ -189,3 +189,10 @@
 - 本批在 Cargo workspace 与 lockfile 中**同时**锁定 SDK `24a9b5521f682eaf70eb9453780ccb16853e20c2`（SDK #71，main 已 7/7 CI），不改变 Rust/Go 的 wire 协议、不加入 TURN/Relay。SDK Cargo manifest 依赖集合与旧固定版一致，因此 Git dependency 更新不引入额外三方包。
 - 新增真实 SDK 高级入口 + Transfer Core 的 PUT/GET 回归：自动配对码校验、两端 ICE nominated、QUIC mTLS + Session HMAC + Control 选路、按需托管认证 Data QUIC、Transfer Core 独立 Control ACK/数据 Stream、UTF-8、空文件、SHA-256 落盘验证，以及安全资源关闭。这是单机 UDP loopback 测试，**不是**公网双机 NAT 证明。
 - **保留明确的待办：**交互 CLI 仍要从旧的手动 assemble 路径迁移到 `ConnectedTransportPeer`/SDK 正式 session API，然后在五平台预览中进行真实 LAN、IPv6 防火墙、普通 NAT、CGNAT 双机 PUT/GET/递归与失败测试；Go v0.16.4 的 Data lane 重传及 2GiB 性能仍需单独量化。TUI/GUI 暂不作为本次核心连接验收的前置。
+
+## 2026-10-11：Transfer session 安全适配层（下一个 CLI 迁移批次）
+
+- SDK #71 集成版已通过 Rust Checks、五平台 Debug、七目标 Preview，并通过 [PR #30](https://github.com/juezhong/p2p-transfer/pull/30) 合并；本机 PUT/GET 只证明新版网络会话可支撑文件业务，不等于 CLI 已迁移或公网 NAT 成功。
+- 本批在 `transfer-core::sdk_quic` 建立仅允许 SDK 已认证类型实现的 **sealed AuthenticatedSession**：兼容旧 `VerifiedManualSession` 与新版 `ConnectedTransportPeer`，只为新版 Control-only Session 开放 Control RPC；新模式 Data 必须从独立的已认证 Data lane 获得，不允许裸 QUIC 或绕开 mTLS PIN/HMAC 的替代。
+- 新增高层 SDK 连接的真实远程目录 RPC/UTF-8 listing 测试，在同一已验证 Control 上进行双向文件传输和目录查询；原低层双 QUIC/五平台 CLI 测试保持不变。
+- 后续 CLI 改造需让文件发送/接收的所有路径通过 Transfer 管理的 Data lane 池，不允许因新 SDK 不提供初始 Data 就静默把文件数据送到 Control；完成后再切换 CLI 创建/加入和真实两机 NAT 测试。Go v0.16.4 的故障重传、远端取消、2GiB 对标仍未完成。
