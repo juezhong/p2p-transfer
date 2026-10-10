@@ -23,3 +23,6 @@ pub mod lease;
 pub mod chunk_reassembly;
 
 pub mod chunk_wire;
+
+/// Transfer-specific selection and scheduling of its four file Data lanes.
+pub mod data_lane_pool;
