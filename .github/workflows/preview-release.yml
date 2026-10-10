@@ -63,6 +63,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
+      - name: Cache Cargo downloaded crates and Git checkouts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-src-${{ runner.os }}-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            cargo-src-${{ runner.os }}-
       - name: Test real workspace including two-process localhost file transfers
         run: cargo test --workspace --target ${{ matrix.target }}
       - name: Build optimized CLI
