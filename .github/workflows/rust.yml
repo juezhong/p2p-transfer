@@ -26,30 +26,24 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-src-${{ runner.os }}-${{ hashFiles('**/Cargo.toml') }}
+          key: cargo-src-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
           restore-keys: |
             cargo-src-${{ runner.os }}-
       - name: 审计工作区 SDK Git 实例和多版本依赖
         shell: bash
         run: |
           set -euo pipefail
-          CARGO_TERM_COLOR=never cargo tree --workspace --prefix none | grep '^p2p-sdk v' | sed 's/ [(][*][)]$//' | sort -u > sdk-versions.txt
+          CARGO_TERM_COLOR=never cargo tree --locked --workspace --prefix none | grep '^p2p-sdk v' | sed 's/ [(][*][)]$//' | sort -u > sdk-versions.txt
           cat sdk-versions.txt
           test "$(wc -l < sdk-versions.txt)" -eq 1
           echo '=== Multiple versions (may be required by transitive semver constraints) ==='
-          cargo tree --workspace --duplicates
-      - name: Capture resolved Cargo.lock for reproducible app builds
-        shell: bash
-        run: |
-          echo CARGO_LOCK_CAPTURE_BEGIN
-          cat Cargo.lock
-          echo CARGO_LOCK_CAPTURE_END
+          cargo tree --locked --workspace --duplicates
       - name: 自动格式化 Rust 源码
         run: cargo fmt --all
       - name: 检查格式化后的结果
         run: |
           cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: 单元测试
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
