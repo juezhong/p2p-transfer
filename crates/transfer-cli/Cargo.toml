@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 transfer-core = { path = "../transfer-core" }
 
-p2p-sdk = { git = "https://github.com/juezhong/p2p-sdk", rev = "65bfa41dae1303d91b0ef3e97ccffb0e6aa94966" }
+p2p-sdk = { git = "https://github.com/juezhong/p2p-sdk", rev = "4372e6afb2d31a61b3be415e47c8fe2b5d9ac897" }
 tokio = { version = "1", features = ["macros", "rt", "time", "sync", "net", "signal"] }
 quinn = "0.11"
 rcgen = "0.14"
