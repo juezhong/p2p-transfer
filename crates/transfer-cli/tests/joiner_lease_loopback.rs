@@ -18,7 +18,7 @@ enum Peer { Creator, Joiner }
 fn launch(exe: &str, cwd: &Path, peer: Peer, reports: Sender<(Peer, String)>) -> Child {
     let mut child = Command::new(exe)
         .current_dir(cwd)
-        .env("P2P_TRANSFER_STUN", "off")
+        .env("P2P_SDK_STUN", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
