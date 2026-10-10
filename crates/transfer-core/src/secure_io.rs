@@ -11,7 +11,7 @@
 use std::{
     ffi::OsString,
     io::{self, Read, Write},
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 use cap_std::{ambient_authority, fs::{Dir, File, OpenOptions}};
@@ -42,14 +42,22 @@ fn io_error(_: io::Error) -> FileAccessError {
 
 pub struct SharedRoot {
     root: Dir,
+    display_root: PathBuf,
 }
 
 impl SharedRoot {
     /// The user explicitly authorizes one local root directory. Do not
     /// obtain this from an untrusted remote command or invitation.
     pub fn authorize(root: &Path) -> Result<Self, FileAccessError> {
+        let display_root = std::fs::canonicalize(root).map_err(io_error)?;
         let root = Dir::open_ambient_dir(root, ambient_authority()).map_err(io_error)?;
-        Ok(Self { root })
+        Ok(Self { root, display_root })
+    }
+
+    /// A display-only path for the explicitly user-approved capability root.
+    /// File access still uses the directory handle, never this path string.
+    pub fn display_root(&self) -> &Path {
+        &self.display_root
     }
 
     /// Return an *already opened handle*, not a path that must later be

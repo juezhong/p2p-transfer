@@ -16,9 +16,10 @@ use tokio::{sync::{mpsc, oneshot, Mutex}, task::JoinHandle};
 use rustyline::{Editor, error::ReadlineError, history::DefaultHistory};
 use transfer_core::{
     lease::TransferLease,
+    progress::{TransferProgress, ProgressSnapshot},
     recursive::{gather_directory, ManifestEntry},
     rpc::list_in_root,
-    sdk_quic::{acquire_transfer_via_sdk, release_transfer_via_sdk, list_typed_via_sdk, list_via_sdk, mkdir_via_sdk, request_get_via_sdk, send_via_managed_sdk, serve_control_stream_with_lease, IncomingResult, RemoteLeaseGrant},
+    sdk_quic::{acquire_transfer_via_sdk, release_transfer_via_sdk, list_typed_via_sdk, list_via_sdk, root_info_via_sdk, mkdir_via_sdk, request_get_via_sdk, send_via_managed_sdk_with_progress, serve_control_stream_with_lease_and_progress, IncomingResult, RemoteLeaseGrant},
     secure_io::SharedRoot,
 };
 
@@ -119,6 +120,7 @@ async fn put_path(
     root: &SharedRoot,
     source: &Path,
     destination: &Path,
+    progress: &TransferProgress,
 ) -> CliResult<()> {
     let entries = match root.list(Some(source)) {
         Ok(_) => Some(gather_directory(root, source).map_err(|e| format!("{e:?}"))?),
@@ -137,8 +139,8 @@ async fn put_path(
                     mkdir_via_sdk(session, relative_string(&remote)?, next_id())
                         .await.map_err(|e| format!("{e:?}"))?;
                 } else {
-                    let receipt = send_via_managed_sdk(
-                        session, lanes, root, path, &relative_string(&remote)?, next_id()
+                    let receipt = send_via_managed_sdk_with_progress(
+                        session, lanes, root, path, &relative_string(&remote)?, next_id(), Some(progress)
                     ).await.map_err(|e| format!("{e:?}"))?;
                     println!("[PUT] {}: {} 字节已校验提交", remote.display(), receipt.bytes);
                 }
@@ -146,8 +148,8 @@ async fn put_path(
             Ok(())
         }
         None => {
-            let receipt = send_via_managed_sdk(
-                session, lanes, root, source, &relative_string(destination)?, next_id()
+            let receipt = send_via_managed_sdk_with_progress(
+                session, lanes, root, source, &relative_string(destination)?, next_id(), Some(progress)
             ).await.map_err(|e| format!("{e:?}"))?;
             println!("[PUT] {} 字节已由接收端校验并提交", receipt.bytes);
             Ok(())
@@ -265,7 +267,32 @@ where
     result
 }
 
+fn print_progress(p: &ProgressSnapshot) {
+    let rate = p.bytes_per_second() / (1024.0 * 1024.0);
+    let eta = p.eta().map(|d| format!("{}s", d.as_secs()))
+        .unwrap_or_else(|| "计算中".to_owned());
+    println!(
+        "[{}] {}: {:.1}% / {} MiB / {} MiB / {:.2} MiB/s / 已用 {}s / 剩余 {}",
+        p.direction, p.file, p.percent(),
+        p.written / 1_048_576, p.total / 1_048_576,
+        rate, p.elapsed.as_secs(), eta,
+    );
+}
+
+/// Always clean up auxiliary managers and the SDK transport on all exits.
 pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
+    let session = Arc::clone(&peer.session);
+    let lanes = Arc::clone(&peer.data_lanes);
+    let result = run_shell(&peer, root).await;
+    session.control.close(0u32.into(), b"user ended transfer shell");
+    lanes.shutdown().await;
+    drop(lanes);
+    drop(peer);
+    if let Ok(owned) = Arc::try_unwrap(session) { owned.shutdown().await; }
+    result
+}
+
+async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let session = Arc::clone(&peer.session);
     let data_lanes = Arc::clone(&peer.data_lanes);
     let active = Arc::new(AtomicBool::new(false));
@@ -285,6 +312,13 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let mut previous_remote = PathBuf::new();
     let mut task: Option<JoinHandle<()>> = None;
     let mut active_batch_id: Option<u64> = None;
+    let mut pending_prompt: Option<PromptReady> = None;
+    let progress = Arc::new(TransferProgress::default());
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut disconnected = false;
+    let mut remote_root: Option<String> = None;
+    let mut incoming_workers = tokio::task::JoinSet::new();
 
     loop {
         tokio::select! {
@@ -303,7 +337,36 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                     });
                 }
             }
-            incoming = session.control().accept_bi() => {
+            _ = session.control().closed(), if !disconnected => {
+                disconnected = true;
+                if let Some(worker) = task.take() {
+                    worker.abort();
+                    let _ = worker.await;
+                }
+                active.store(false, Ordering::SeqCst);
+                progress.clear();
+                active_batch_id = None;
+                pending_prompt.take();
+                println!("\n[连接] 对端已断开；本次会话不能继续传输，请输入 quit 退出。");
+            }
+            completed = incoming_workers.join_next(), if !incoming_workers.is_empty() => {
+                if let Some(Err(err)) = completed {
+                    if !disconnected { eprintln!("[远端请求] 任务异常终止：{err}"); }
+                }
+            }
+            _ = tick.tick() => {
+                if let Some(snapshot) = progress.snapshot() { print_progress(&snapshot); }
+                if task.as_ref().is_some_and(JoinHandle::is_finished) {
+                    if let Some(done) = task.take() {
+                        if let Err(err) = done.await { eprintln!("[任务] 已中止：{err}"); }
+                    }
+                    progress.clear();
+                    active_batch_id = None;
+                    active.store(false, Ordering::SeqCst);
+                    pending_prompt.take();
+                }
+            }
+            incoming = session.control().accept_bi(), if !disconnected => {
                 match incoming {
                     Ok((send, recv)) => {
                         let session = Arc::clone(&session);
@@ -312,12 +375,15 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let pending = Arc::clone(&pending_downloads);
                         let arbiter = arbiter.clone();
                         let remote_grant = Arc::clone(&remote_grant);
-                        tokio::spawn(async move {
+                        let progress = Arc::clone(&progress);
+                        incoming_workers.spawn(async move {
                             // Separate control RPCs may remain usable while
                             // a data task is running; the protocol dispatcher
                             // never passes file bytes on Control QUIC.
                             let auth = if is_creator { Some((&arbiter, &remote_grant)) } else { None };
-                            match serve_control_stream_with_lease(&session, &root, send, recv, auth, Some(&lanes)).await {
+                            match serve_control_stream_with_lease_and_progress(
+                                &session, &root, send, recv, auth, Some(&lanes), Some(&progress),
+                            ).await {
                                 Ok(IncomingResult::Received(receipt)) => {
                                     println!("\n[文件] 已接收并验证 {} 字节（SHA-256 OK）", receipt.bytes);
                                     if let Some(done) = pending.lock().await.remove(&receipt.request_id) {
@@ -328,21 +394,29 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                                     println!("\n[GET] 已回传 {} 字节", receipt.bytes);
                                 }
                                 Ok(IncomingResult::DirectoryListed) => {}
-                                Err(err) => eprintln!("\n[远端请求] 处理失败：{err:?}"),
+                                Err(err) => {
+                                    if session.control().close_reason().is_none() {
+                                        eprintln!("\n[远端请求] 处理失败：{err:?}");
+                                    }
+                                },
                             }
                         });
                     }
                     Err(_) => {
-                        return Err(format!(
-                            "Control QUIC 连接已断开：{:?}；认证 Data QUIC 活跃数：{}",
-                            session.control().close_reason(),
-                            data_lanes.available().await.len(),
-                        ));
+                        disconnected = true;
+                        if let Some(worker) = task.take() {
+                            worker.abort();
+                            let _ = worker.await;
+                        }
+                        progress.clear();
+                        active.store(false, Ordering::SeqCst);
+                        pending_prompt.take();
+                        println!("\n[连接] 对端已断开；输入 quit 退出。");
                     },
                 }
             }
             input = rx.recv() => {
-                let _prompt_ready = PromptReady(prompt_ready.clone());
+                let mut prompt_guard = Some(PromptReady(prompt_ready.clone()));
                 let Some(line) = input else { return Ok(()); };
                 let args = match shell_words::split(&line) {
                     Ok(args) => args,
@@ -350,24 +424,61 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                 };
                 if args.is_empty() { continue; }
                 let cmd = args[0].to_lowercase();
+                if (disconnected || session.control().close_reason().is_some())
+                    && !matches!(cmd.as_str(), "quit" | "exit" | "bye") {
+                    println!("[连接] 对端已经断开；任何操作都无法继续，请输入 quit 退出。");
+                    continue;
+                }
                 match cmd.as_str() {
                     "quit" | "exit" | "bye" => {
-                        data_lanes.shutdown().await;
-                        session.control().close(0u32.into(), b"bye");
+                        if let Some(worker) = task.take() {
+                            worker.abort();
+                            let _ = worker.await;
+                        }
                         return Ok(());
                     }
                     "help" | "?" => help(),
                     "status" => {
-                        let actual = data_lanes.available().await.len();
+                        let links = data_lanes.available().await;
+                        let actual = links.len();
                         println!("已认证 Data QUIC 活跃连接：{}/4", actual);
                         println!("角色={}；Control QUIC={}；认证 Data QUIC={}；UDP {} -> {}",
                             peer.role,
                             if session.control().close_reason().is_none() { "connected" } else { "closed" },
                             if actual > 0 { "connected" } else { "reconnecting" },
                             peer.local_address, peer.peer_address);
-                        println!("文件任务活动={}；本地共享根目录已授权", active.load(Ordering::SeqCst));
-                        println!("当前远端目录=/{}；当前本地相对目录=/{}",
-                            remote_cwd.display(), local_cwd.display());
+                        let d = session.diagnostic();
+                        println!("=== 会话状态 ===");
+                        println!("Control: 本地={} / 对端={} / 本端拨号={} / ICE={:?} / 对端候选={:?}",
+                            d.actual_local_udp, d.actual_remote_udp, d.control_outbound,
+                            d.ice_role, d.remote_candidate_kind);
+                        println!("STUN 一致性={:?}；网关映射={:?}；网关方式={:?}",
+                            d.stun_consistency, d.gateway_mapping, d.gateway_method);
+                        println!("信令阶段 UDP 候选: {:?}", d.offered_host_candidates);
+                        println!("已认证 prflx 地址: {:?}", d.authenticated_peer_reflexive);
+                        for (i, link) in links.iter().enumerate() {
+                            println!("Data QUIC #{}: 认证成功 / ID={} / 本机 IP={:?} / 对端 UDP={}",
+                                i + 1, link.stable_id(), link.local_ip(), link.remote_address());
+                        }
+                        if remote_root.is_none() {
+                            if let Ok(Ok(path)) = tokio::time::timeout(
+                                Duration::from_secs(3), root_info_via_sdk(&session, next_id())
+                            ).await { remote_root = Some(path); }
+                        }
+                        println!("本机实际授权目录: {}", root.display_root().display());
+                        println!("对端实际授权目录: {}",
+                            remote_root.as_deref().unwrap_or("未取得（RPC 超时或对端版本不兼容）"));
+                        let remote_id = remote_grant.lock().await.active_request();
+                        if let Some(id) = remote_id {
+                            println!("文件传输租约: BUSY / 发起方=对端 / request_id={id}");
+                        } else if let Some(id) = arbiter.active_request() {
+                            println!("文件传输租约: BUSY / 发起方=本机 / request_id={id}");
+                        } else {
+                            println!("文件传输租约: IDLE");
+                        }
+                        if let Some(snapshot) = progress.snapshot() { print_progress(&snapshot); }
+                        println!("本地任务活动={}；本机相对目录=/{}；远端相对目录=/{}",
+                            active.load(Ordering::SeqCst), local_cwd.display(), remote_cwd.display());
                     }
                     "pwd" if args.len() == 1 => println!("/{}", remote_cwd.display()),
                     "lpwd" if args.len() == 1 => println!("/{}", local_cwd.display()),
@@ -420,17 +531,20 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let lanes = Arc::clone(&data_lanes);
                         let activity = Arc::clone(&active);
                         let lease = arbiter.clone();
+                        let progress = Arc::clone(&progress);
+                        progress.clear();
                         let batch_id = next_id();
                         active_batch_id = Some(batch_id);
                         task = Some(tokio::spawn(async move {
                             let result = with_batch_lease(&session, &lease, is_creator, batch_id,
-                                put_path(&session, &lanes, &root, &source, &remote)).await;
+                                put_path(&session, &lanes, &root, &source, &remote, &progress)).await;
                             match result {
                                 Ok(()) => println!("\n[PUT] 文件或目录任务完成"),
                                 Err(err) => eprintln!("\n[PUT] 失败：{err}"),
                             }
                             activity.store(false, Ordering::SeqCst);
                         }));
+                        pending_prompt = prompt_guard.take();
                     }
                     "get" if (2..=3).contains(&args.len()) => {
                         let src = root_relative(&remote_cwd, &args[1])?;
@@ -449,6 +563,8 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let grant = Arc::clone(&remote_grant);
                         let activity = Arc::clone(&active);
                         let lease = arbiter.clone();
+                        let progress = Arc::clone(&progress);
+                        progress.clear();
                         let batch_id = next_id();
                         active_batch_id = Some(batch_id);
                         task = Some(tokio::spawn(async move {
@@ -461,6 +577,7 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             }
                             activity.store(false, Ordering::SeqCst);
                         }));
+                        pending_prompt = prompt_guard.take();
                     }
                     "cancel" if args.len() == 1 => {
                         if let Some(handle) = task.take() {
@@ -476,6 +593,8 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                                     }
                                 }
                                 active.store(false, Ordering::SeqCst);
+                                progress.clear();
+                                pending_prompt.take();
                                 println!("[CANCEL] 已中止本地任务；Control QUIC 保持连接");
                             } else {
                                 println!("[CANCEL] 当前没有正在运行的本地任务");
@@ -502,6 +621,8 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                                 }
                             }
                             active.store(false, Ordering::SeqCst);
+                            progress.clear();
+                            pending_prompt.take();
                             println!("\n[CANCEL] 当前本地任务已中断，会话仍然保持");
                         } else {
                             println!("\n没有活动的本地发送任务，输入 quit 退出");

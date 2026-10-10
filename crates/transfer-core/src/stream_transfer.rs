@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
+    progress::TransferProgress,
     protocol::{CodecError, Frame, FrameKind, HEADER_LEN, MAGIC, MAX_PAYLOAD},
     secure_io::{FileAccessError, SharedRoot},
     task::{Task, TaskId},
@@ -150,12 +151,19 @@ fn cumulative_ack(
 /// The caller MUST supply streams belonging to an SDK-verified peer/session.
 /// Blocking filesystem reads will later be moved to a dedicated I/O executor.
 pub async fn send_file<C, D>(
-    control: &mut C,
-    data: &mut D,
-    root: &SharedRoot,
-    source: &Path,
-    remote_destination: &str,
-    request_id: u64,
+    control: &mut C, data: &mut D, root: &SharedRoot, source: &Path,
+    remote_destination: &str, request_id: u64,
+) -> Result<TransferReceipt, TransferError>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    D: AsyncWrite + Unpin,
+{
+    send_file_with_progress(control, data, root, source, remote_destination, request_id, None).await
+}
+
+pub async fn send_file_with_progress<C, D>(
+    control: &mut C, data: &mut D, root: &SharedRoot, source: &Path,
+    remote_destination: &str, request_id: u64, progress: Option<&TransferProgress>,
 ) -> Result<TransferReceipt, TransferError>
 where
     C: AsyncRead + AsyncWrite + Unpin,
@@ -165,6 +173,9 @@ where
     // inside the same capability root; a changed file fails receiver SHA.
     let mut file = root.open_read(source)?;
     let bytes = file.metadata()?.len();
+    if let Some(p) = progress {
+        p.begin("发送", source.display().to_string(), bytes);
+    }
     let mut hasher = Sha256::new();
     let mut buf = [0u8; CHUNK];
     loop {
@@ -200,6 +211,7 @@ where
         task.acknowledge_written(next)
             .map_err(|_| TransferError::Protocol("task acknowledgement failed"))?;
         acknowledged = next;
+        if let Some(p) = progress { p.written(acknowledged); }
     }
     // The receiver checks SHA, fsyncs, and atomically publishes before DONE.
     let final_frame = read_frame(control).await?;
@@ -237,10 +249,18 @@ where
 /// the first bounded Frame. This allows one session to handle both file
 /// offers and directory/GET RPC without consuming the wrong stream.
 pub async fn receive_file_after_offer<C, D>(
-    frame: Frame,
-    control: &mut C,
-    data: &mut D,
-    root: &SharedRoot,
+    frame: Frame, control: &mut C, data: &mut D, root: &SharedRoot,
+) -> Result<TransferReceipt, TransferError>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    D: AsyncRead + Unpin,
+{
+    receive_file_after_offer_with_progress(frame, control, data, root, None).await
+}
+
+pub async fn receive_file_after_offer_with_progress<C, D>(
+    frame: Frame, control: &mut C, data: &mut D, root: &SharedRoot,
+    progress: Option<&TransferProgress>,
 ) -> Result<TransferReceipt, TransferError>
 where
     C: AsyncRead + AsyncWrite + Unpin,
@@ -257,6 +277,7 @@ where
             return Err(err);
         }
     };
+    if let Some(p) = progress { p.begin("接收", offer.destination.clone(), offer.bytes); }
     let mut sink = match root.receive_part(Path::new(&offer.destination), offer.bytes) {
         Ok(sink) => sink,
         Err(err) => {
@@ -275,6 +296,7 @@ where
         }
         data.read_exact(&mut buf[..n]).await?;
         let written = sink.append(&buf[..n])?;
+        if let Some(p) = progress { p.written(written); }
         left -= n as u64;
         write_frame(control, FrameKind::Ack, request_id, written.to_be_bytes().to_vec()).await?;
     }
