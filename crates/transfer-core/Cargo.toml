@@ -13,7 +13,7 @@ getrandom = "0.3"
 
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync", "time"] }
 quinn = "0.11"
-p2p-sdk = { git = "https://github.com/juezhong/p2p-sdk", rev = "17a2b059a800ef5fbb6f53f6f855560d174ee960" }
+p2p-sdk = { git = "https://github.com/juezhong/p2p-sdk", rev = "193be7e04ece47afe53a9d0a4e2b0f4574f5ffbc" }
 
 [dev-dependencies]
 quinn = "0.11"
