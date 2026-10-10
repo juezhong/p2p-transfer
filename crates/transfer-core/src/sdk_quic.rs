@@ -15,7 +15,8 @@ use std::{
     time::Duration,
 };
 
-use p2p_sdk::{resilient_data::ResilientDataLanes, verified_session::VerifiedManualSession};
+use p2p_sdk::verified_session::VerifiedManualSession;
+use crate::data_lane_pool::ResilientDataLanes;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::{

@@ -6,3 +6,11 @@ resolver = "2"
 edition = "2021"
 rust-version = "1.85"
 license = "GPL-2.0-only"
+
+[workspace.dependencies]
+# SDK 统一固定到经跨平台 CI 验证的提交，避免不同 crate 拉取不同实例。
+p2p-sdk = { git = "https://github.com/juezhong/p2p-sdk", rev = "5aa615d7ec84bd938d45246ce238b5e4ba735a97" }
+tokio = "1"
+quinn = "0.11"
+rcgen = "0.14"
+rustls = "0.23"

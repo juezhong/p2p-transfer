@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -16,12 +20,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Cache Cargo downloaded crates and Git checkouts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-src-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: |
+            cargo-src-${{ runner.os }}-
+      - name: 审计工作区 SDK Git 实例和多版本依赖
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_TERM_COLOR=never cargo tree --locked --workspace --prefix none | grep '^p2p-sdk v' | sed 's/ [(][*][)]$//' | sort -u > sdk-versions.txt
+          cat sdk-versions.txt
+          test "$(wc -l < sdk-versions.txt)" -eq 1
+          echo '=== Multiple versions (may be required by transitive semver constraints) ==='
+          cargo tree --locked --workspace --duplicates
       - name: 自动格式化 Rust 源码
         run: cargo fmt --all
       - name: 检查格式化后的结果
         run: |
           cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: 单元测试
-        run: cargo test --workspace
+        run: cargo test --locked --workspace

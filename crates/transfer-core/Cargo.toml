@@ -11,11 +11,10 @@ sha2 = "0.10"
 getrandom = "0.3"
 
 
-tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
-quinn = "0.11"
-p2p-sdk = { git = "https://github.com/juezhong/p2p-sdk", rev = "65bfa41dae1303d91b0ef3e97ccffb0e6aa94966" }
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync", "time", "net"] }
+quinn.workspace = true
+p2p-sdk.workspace = true
 
 [dev-dependencies]
-quinn = "0.11"
-rcgen = "0.14"
-rustls = "0.23"
+rcgen.workspace = true
+rustls.workspace = true

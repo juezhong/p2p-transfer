@@ -3,6 +3,7 @@
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use transfer_core::data_lane_pool::{ResilientDataLanes, MAX_DATA_LANES};
 use p2p_sdk::{
     ice_signaling::IceRole,
     local_network::local_addresses,
@@ -11,7 +12,6 @@ use p2p_sdk::{
     manual_pairing::ManualPairing,
     peer_pin::ManualConfirmation,
     quinn_socket::{demux_endpoint_config, QuinnUdpAdapter},
-    resilient_data::{ResilientDataLanes, MAX_DATA_LANES},
     session_binding::ReplayGuard,
     tls_identity::{authenticated_client_config, authenticated_server_config},
     udp_owner::UdpOwner,

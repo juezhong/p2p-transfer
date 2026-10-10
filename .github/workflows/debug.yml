@@ -6,6 +6,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -42,10 +46,19 @@ jobs:
         with:
           components: rustfmt, clippy
           targets: ${{ matrix.target }}
+      - name: Cache Cargo downloaded crates and Git checkouts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-src-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: |
+            cargo-src-${{ runner.os }}-
       - name: Build Transfer CLI debug
-        run: cargo build -p transfer-cli --bin p2p-transfer --target ${{ matrix.target }}
+        run: cargo build --locked -p transfer-cli --bin p2p-transfer --target ${{ matrix.target }}
       - name: Run all workspace tests including two-process CLI loopback
-        run: cargo test --workspace --target ${{ matrix.target }}
+        run: cargo test --locked --workspace --target ${{ matrix.target }}
       - name: Upload CLI debug artifact
         uses: actions/upload-artifact@v4
         with:
