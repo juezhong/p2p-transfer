@@ -111,6 +111,24 @@ impl Drop for PromptReady {
 
 type PendingDownloads = Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>>;
 
+/// Cancellation safety: an aborted GET must not leave a pending response
+/// sender behind while the Control session continues accepting commands.
+struct PendingDownloadGuard {
+    id: u64,
+    requests: PendingDownloads,
+}
+impl Drop for PendingDownloadGuard {
+    fn drop(&mut self) {
+        if let Ok(mut entries) = self.requests.try_lock() {
+            entries.remove(&self.id);
+        } else {
+            let requests = Arc::clone(&self.requests);
+            let id = self.id;
+            tokio::spawn(async move { requests.lock().await.remove(&id); });
+        }
+    }
+}
+
 /// A directory PUT keeps the whole batch under one CLI task lease. Every
 /// file is still transferred through separate Control/Data QUIC streams,
 /// with per-file SHA-256 and no-clobber commit.
@@ -175,6 +193,9 @@ async fn get_one_file(
     };
     let (done_tx, done_rx) = oneshot::channel();
     pending.lock().await.insert(id, done_tx);
+    let _pending_guard = PendingDownloadGuard {
+        id, requests: Arc::clone(pending),
+    };
     if let Err(err) = request_get_via_sdk(
         session, relative_string(source)?, relative_string(destination)?, id
     ).await {
