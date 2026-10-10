@@ -7,7 +7,8 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 use p2p_sdk::{direct_peer::{begin_creator, begin_joiner}, transport_session::ConnectedTransportPeer};
 use transfer_core::{
-    sdk_quic::ControlIo, secure_io::SharedRoot,
+    sdk_quic::{list_via_sdk, serve_control_stream, ControlIo, IncomingResult},
+    secure_io::SharedRoot,
     stream_transfer::{receive_file, send_file, TransferReceipt},
 };
 
@@ -161,6 +162,22 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                         std::fs::metadata(dir.join("A/空文件.bin")).unwrap().len(),
                         0,
                     );
+
+                    // New high-level SDK Control supports the *same* directory
+                    // RPC contract as the original SDK VerifiedManualSession.
+                    // A sealed authentication boundary prevents raw QUIC from
+                    // being accidentally accepted as a verified peer.
+                    let (listing, response) = tokio::join!(
+                        list_via_sdk(&creator, String::new(), 13),
+                        async {
+                            let (tx, rx) = joiner.control.accept_bi().await.unwrap();
+                            serve_control_stream(&joiner, &destination, tx, rx).await
+                        }
+                    );
+                    assert!(matches!(response.unwrap(), IncomingResult::DirectoryListed));
+                    let names = listing.unwrap();
+                    assert!(names.iter().any(|name| name == "收到 文件.txt"));
+                    assert!(names.iter().any(|name| name == "empty.bin"));
 
                     creator_managed.shutdown().await;
                     joiner_managed.shutdown().await;
