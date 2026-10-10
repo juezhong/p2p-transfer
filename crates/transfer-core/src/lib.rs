@@ -13,6 +13,7 @@ pub mod secure_io;
 pub mod stream_transfer;
 
 pub mod sdk_quic;
+pub mod transport_lanes;
 
 pub mod rpc;
 
