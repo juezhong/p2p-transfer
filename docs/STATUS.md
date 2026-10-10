@@ -182,3 +182,10 @@
 - [PR #18](https://github.com/juezhong/p2p-transfer/pull/18) 合并 `59f8de93`：创建方服务端强制限制无有效租约的入站 PUT/GET，合法的创建方 GET 文件回传可用本地租约通过；[Rust CI #37941727884](https://github.com/juezhong/p2p-transfer/actions/runs/37941727884) 与 [五平台 CI #37941727508](https://github.com/juezhong/p2p-transfer/actions/runs/37941727508) 成功。此前检测并修复了错误拒绝合法 GET 回传的回归。
 - [PR #20](https://github.com/juezhong/p2p-transfer/pull/20) 合并 `b5e1fb6d`：从最新 main 重放 Go 式**无任何必填启动参数**交互入口，保留 --help/--version，移除旧 send/receive 参数与测试；[Rust CI #37942622689](https://github.com/juezhong/p2p-transfer/actions/runs/37942622689) 和 [五平台 CI #37942622723](https://github.com/juezhong/p2p-transfer/actions/runs/37942622723) 成功。原有冲突的 PR #19 已关闭未合并。
 - **不等于完成**：尚须请求 ID 与具体租约绑定、防恶意配对端绕开仲裁、真正远端取消、Data QUIC 故障自动恢复和未确认分块重传、最多四条独立数据连接、Tab 路径补全、SDK consent/restart/PCP/NAT-PMP/UPnP/IPv6 与多网络验收、三平台 2GiB 基准。TUI/GUI 依用户要求暂缓；当前不创建稳定 Release。
+
+## 2026-10-10：迁移至最终 SDK #71 并验证 Go v0.16.4 连接→文件业务链
+
+- Transfer 原 `main` 仍锁定早期 SDK `5aa615d7`，其交互 CLI 还在直接驱动旧版 gather/ICE/Quinn，不能据此宣称最新版 SDK 的动态 prflx、JOIN 提前接纳及 Control 选路已在 Transfer 上实际验证。
+- 本批在 Cargo workspace 与 lockfile 中**同时**锁定 SDK `24a9b5521f682eaf70eb9453780ccb16853e20c2`（SDK #71，main 已 7/7 CI），不改变 Rust/Go 的 wire 协议、不加入 TURN/Relay。SDK Cargo manifest 依赖集合与旧固定版一致，因此 Git dependency 更新不引入额外三方包。
+- 新增真实 SDK 高级入口 + Transfer Core 的 PUT/GET 回归：自动配对码校验、两端 ICE nominated、QUIC mTLS + Session HMAC + Control 选路、按需托管认证 Data QUIC、Transfer Core 独立 Control ACK/数据 Stream、UTF-8、空文件、SHA-256 落盘验证，以及安全资源关闭。这是单机 UDP loopback 测试，**不是**公网双机 NAT 证明。
+- **保留明确的待办：**交互 CLI 仍要从旧的手动 assemble 路径迁移到 `ConnectedTransportPeer`/SDK 正式 session API，然后在五平台预览中进行真实 LAN、IPv6 防火墙、普通 NAT、CGNAT 双机 PUT/GET/递归与失败测试；Go v0.16.4 的 Data lane 重传及 2GiB 性能仍需单独量化。TUI/GUI 暂不作为本次核心连接验收的前置。

@@ -9,7 +9,7 @@ license = "GPL-2.0-only"
 
 [workspace.dependencies]
 # SDK 统一固定到经跨平台 CI 验证的提交，避免不同 crate 拉取不同实例。
-p2p-sdk = { git = "https://github.com/juezhong/p2p-sdk", rev = "5aa615d7ec84bd938d45246ce238b5e4ba735a97" }
+p2p-sdk = { git = "https://github.com/juezhong/p2p-sdk", rev = "24a9b5521f682eaf70eb9453780ccb16853e20c2" }
 tokio = "1"
 quinn = "0.11"
 rcgen = "0.14"
