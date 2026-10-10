@@ -477,9 +477,12 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             d.stun_consistency, d.gateway_mapping, d.gateway_method);
                         println!("信令阶段 UDP 候选: {:?}", d.offered_host_candidates);
                         println!("已认证 prflx 地址: {:?}", d.authenticated_peer_reflexive);
-                        for (i, link) in links.iter().enumerate() {
-                            println!("Data QUIC #{}: 认证成功 / ID={} / 本机 IP={:?} / 对端 UDP={}",
-                                i + 1, link.stable_id(), link.local_ip(), link.remote_address());
+                        for lane in data_lanes.statuses().await {
+                            println!(
+                                "Data QUIC #{}: phase={:?} / generation={} / id={:?} / local IP={:?} / remote UDP={:?} / error={:?}",
+                                lane.index, lane.phase, lane.generation, lane.connection_id,
+                                lane.local_ip, lane.remote_udp, lane.last_error,
+                            );
                         }
                         if remote_root.is_none() {
                             if let Ok(Ok(path)) = tokio::time::timeout(
