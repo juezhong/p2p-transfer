@@ -4,6 +4,7 @@
 //! on-demand Data QUIC. Local loopback is NOT public NAT validation.
 
 use std::{path::Path, sync::Arc, time::Duration};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use p2p_sdk::{direct_peer::{begin_creator, begin_joiner}, transport_session::ConnectedTransportPeer};
 use transfer_core::{
@@ -39,6 +40,13 @@ async fn send_one(
             let (tx, rx) = sender.control.open_bi().await.unwrap();
             let mut control = ControlIo::new(rx, tx);
             let mut data = send_lane.open_uni().await.unwrap();
+            // QUIC open_uni() alone does not send a STREAM frame.
+            // Match Transfer's real P2PD + request-ID preface BEFORE
+            // send_file waits for the receiver's initial Control ACK.
+            let mut preface = [0u8; 12];
+            preface[..4].copy_from_slice(b"P2PD");
+            preface[4..].copy_from_slice(&request.to_be_bytes());
+            data.write_all(&preface).await.unwrap();
             let result = send_file(
                 &mut control, &mut data, source_root,
                 Path::new(name), remote_name, request,
@@ -50,6 +58,13 @@ async fn send_one(
             let (tx, rx) = receiver.control.accept_bi().await.unwrap();
             let mut control = ControlIo::new(rx, tx);
             let mut data = recv_lane.accept_uni().await.unwrap();
+            let mut preface = [0u8; 12];
+            data.read_exact(&mut preface).await.unwrap();
+            assert_eq!(&preface[..4], b"P2PD", "Data stream must be tagged");
+            assert_eq!(
+                u64::from_be_bytes(preface[4..].try_into().unwrap()), request,
+                "Data stream must match the authenticated Control request"
+            );
             receive_file(&mut control, &mut data, destination_root)
                 .await.unwrap()
         }
