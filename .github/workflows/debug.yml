@@ -52,13 +52,13 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-src-${{ runner.os }}-${{ hashFiles('**/Cargo.toml') }}
+          key: cargo-src-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
           restore-keys: |
             cargo-src-${{ runner.os }}-
       - name: Build Transfer CLI debug
-        run: cargo build -p transfer-cli --bin p2p-transfer --target ${{ matrix.target }}
+        run: cargo build --locked -p transfer-cli --bin p2p-transfer --target ${{ matrix.target }}
       - name: Run all workspace tests including two-process CLI loopback
-        run: cargo test --workspace --target ${{ matrix.target }}
+        run: cargo test --locked --workspace --target ${{ matrix.target }}
       - name: Upload CLI debug artifact
         uses: actions/upload-artifact@v4
         with:
