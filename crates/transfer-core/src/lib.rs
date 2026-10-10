@@ -26,3 +26,6 @@ pub mod chunk_wire;
 
 /// Transfer-specific selection and scheduling of its four file Data lanes.
 pub mod data_lane_pool;
+
+/// Transfer-owned Data QUIC lane pool using only the SDK's authenticated links.
+pub mod modern_data_lanes;

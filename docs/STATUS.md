@@ -196,3 +196,11 @@
 - 本批在 `transfer-core::sdk_quic` 建立仅允许 SDK 已认证类型实现的 **sealed AuthenticatedSession**：兼容旧 `VerifiedManualSession` 与新版 `ConnectedTransportPeer`，只为新版 Control-only Session 开放 Control RPC；新模式 Data 必须从独立的已认证 Data lane 获得，不允许裸 QUIC 或绕开 mTLS PIN/HMAC 的替代。
 - 新增高层 SDK 连接的真实远程目录 RPC/UTF-8 listing 测试，在同一已验证 Control 上进行双向文件传输和目录查询；原低层双 QUIC/五平台 CLI 测试保持不变。
 - 后续 CLI 改造需让文件发送/接收的所有路径通过 Transfer 管理的 Data lane 池，不允许因新 SDK 不提供初始 Data 就静默把文件数据送到 Control；完成后再切换 CLI 创建/加入和真实两机 NAT 测试。Go v0.16.4 的故障重传、远端取消、2GiB 对标仍未完成。
+
+## 2026-10-11：以 SDK 托管认证 Data 链路作为 Transfer 正式池
+
+- #31 已通过 13/13 跨平台检查并合并；新版 SDK Control RPC 仅接受 SDK 已认证会话。
+- 新增 `modern_data_lanes::ModernDataLanes`：通过 SDK `ConnectedTransportPeer::manage_authenticated_data()` 管理最多四条独立 mTLS PIN + Session HMAC 认证的 QUIC Data 连接，按 SDK 状态实现失败重拨/重新接受，应用自身不重新实现 ICE、UDP Owner 或证书验证。
+- 新增 **sealed `AuthenticatedDataStreams`**：兼容旧 `ResilientDataLanes` 与新 SDK Data pool，禁止第三方裸 QUIC 流伪装认证 Data。
+- 集成测试补充真正 `send_via_managed_sdk` + `serve_control_stream_with_lease` 经过认证 Data 池上的 Control ACK/数据落盘/SHA-256 检验。
+- 本批仍未切换正式 CLI 创建/加入，也未完成真实 NAT/CGNAT、Go v0.16.4 文件断线重发和取消的现场验收。

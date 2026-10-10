@@ -7,24 +7,12 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 use p2p_sdk::{direct_peer::{begin_creator, begin_joiner}, transport_session::ConnectedTransportPeer};
 use transfer_core::{
-    sdk_quic::{list_via_sdk, serve_control_stream, ControlIo, IncomingResult},
+    modern_data_lanes::ModernDataLanes,
+    sdk_quic::{list_via_sdk, serve_control_stream, send_via_managed_sdk,
+        serve_control_stream_with_lease, ControlIo, IncomingResult},
     secure_io::SharedRoot,
     stream_transfer::{receive_file, send_file, TransferReceipt},
 };
-
-async fn wait_data(
-    managed: &p2p_sdk::transport_session::ManagedAuthenticatedLink,
-) -> quinn::Connection {
-    let mut changed = managed.subscribe();
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(connection) = managed.current() {
-                return connection;
-            }
-            changed.changed().await.expect("managed Data link must not stop");
-        }
-    }).await.expect("authenticated Data QUIC link timed out")
-}
 
 async fn send_one(
     peers: (&ConnectedTransportPeer, &ConnectedTransportPeer),
@@ -133,11 +121,14 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                     );
 
                     // Application, not SDK, owns the number of Data lanes.
-                    let creator_managed = creator.manage_authenticated_data();
-                    let joiner_managed = joiner.manage_authenticated_data();
+                    let creator_pool = ModernDataLanes::start(Arc::clone(&creator), 1).unwrap();
+                    let joiner_pool = ModernDataLanes::start(Arc::clone(&joiner), 1).unwrap();
                     let (creator_data, joiner_data) = tokio::join!(
-                        wait_data(&creator_managed), wait_data(&joiner_managed)
+                        creator_pool.wait_for_count(1, Duration::from_secs(20)),
+                        joiner_pool.wait_for_count(1, Duration::from_secs(20)),
                     );
+                    let creator_data = creator_data.unwrap().remove(0);
+                    let joiner_data = joiner_data.unwrap().remove(0);
 
                     let (sent, received) = send_one(
                         (&creator, &joiner), (&creator_data, &joiner_data),
@@ -179,8 +170,35 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                     assert!(names.iter().any(|name| name == "收到 文件.txt"));
                     assert!(names.iter().any(|name| name == "empty.bin"));
 
-                    creator_managed.shutdown().await;
-                    joiner_managed.shutdown().await;
+                    // Test the production Transfer code path with SDK-managed,
+                    // independently authenticated Data streams and a real
+                    // Control RPC dispatcher (not raw test streams).
+                    let (sent_again, incoming) = tokio::join!(
+                        send_via_managed_sdk(
+                            &creator, &creator_pool, &source, Path::new("中文名.txt"),
+                            "第二份.txt", 14,
+                        ),
+                        async {
+                            let (tx, rx) = joiner.control.accept_bi().await.unwrap();
+                            serve_control_stream_with_lease(
+                                &joiner, &destination, tx, rx, None, Some(&joiner_pool),
+                            ).await
+                        },
+                    );
+                    let received_again = match incoming.unwrap() {
+                        IncomingResult::Received(receipt) => receipt,
+                        _ => panic!("expected a committed file over SDK-managed Data"),
+                    };
+                    assert_eq!(sent_again.unwrap(), received_again);
+                    assert_eq!(
+                        std::fs::read(dir.join("B/第二份.txt")).unwrap(),
+                        payload.as_bytes(),
+                    );
+
+                    creator_pool.shutdown().await;
+                    joiner_pool.shutdown().await;
+                    drop(creator_pool);
+                    drop(joiner_pool);
                     Arc::try_unwrap(creator).ok().unwrap().shutdown().await;
                     Arc::try_unwrap(joiner).ok().unwrap().shutdown().await;
                     drop(source);
