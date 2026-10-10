@@ -139,7 +139,7 @@ fn recursive_put_get_across_two_real_cli_processes() {
         if line.contains("失败：") || line.contains("Transfer failed:") {
             let _ = a.kill();
             let _ = b.kill();
-            panic!("Go-style shell failed: {:?}", transcript);
+            panic!("Go-style shell failed: latest={line:?}; transcript={transcript:?}");
         }
         let secret = line.contains("P2PR-INV2-") || line.contains("P2PR-REP2-");
         if transcript.len() < 100 {
