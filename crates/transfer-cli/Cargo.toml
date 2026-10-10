@@ -12,10 +12,10 @@ path = "src/main.rs"
 [dependencies]
 transfer-core = { path = "../transfer-core" }
 
-p2p-sdk = { git = "https://github.com/juezhong/p2p-sdk", rev = "4372e6afb2d31a61b3be415e47c8fe2b5d9ac897" }
-tokio = { version = "1", features = ["macros", "rt", "time", "sync", "net", "signal"] }
-quinn = "0.11"
-rcgen = "0.14"
-rustls = "0.23"
+p2p-sdk.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "time", "sync", "net", "signal"] }
+quinn.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
 shell-words = "1.1"
 rustyline = "15.0"
