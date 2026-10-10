@@ -8,6 +8,7 @@
 use std::{
     collections::{HashSet, VecDeque},
     io,
+    future::Future,
     path::Path,
     pin::Pin,
     task::{Context, Poll},
@@ -26,6 +27,10 @@ use p2p_sdk::{
 mod private {
     use super::{Arc, ConnectedTransportPeer, VerifiedManualSession};
     pub trait Sealed {}
+    pub trait DataSealed {}
+    impl DataSealed for super::ResilientDataLanes {}
+    impl DataSealed for super::ModernDataLanes {}
+    impl<T: DataSealed + ?Sized> DataSealed for Arc<T> {}
     impl Sealed for VerifiedManualSession {}
     impl Sealed for ConnectedTransportPeer {}
     impl<T: Sealed + ?Sized> Sealed for Arc<T> {}
@@ -60,7 +65,7 @@ impl<T: AuthenticatedSession + ?Sized> AuthenticatedSession for Arc<T> {
         T::initial_data(self)
     }
 }
-use crate::data_lane_pool::ResilientDataLanes;
+use crate::{data_lane_pool::ResilientDataLanes, modern_data_lanes::ModernDataLanes};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::{
@@ -105,6 +110,67 @@ impl From<TransferError> for SdkTransferError {
 impl From<io::Error> for SdkTransferError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+
+/// This trait only accepts Data streams from Transfer-owned, SDK-authenticated
+/// pools. Arbitrary Quinn connections cannot bypass mTLS PIN + Session HMAC.
+pub trait AuthenticatedDataStreams: private::DataSealed + Send + Sync {
+    fn open_uni(&self, deadline: Duration)
+        -> Pin<Box<dyn Future<Output = Result<quinn::SendStream, SdkTransferError>> + Send + '_>>;
+    fn accept_uni(&self, deadline: Duration)
+        -> Pin<Box<dyn Future<Output = Result<quinn::RecvStream, SdkTransferError>> + Send + '_>>;
+}
+
+impl AuthenticatedDataStreams for ResilientDataLanes {
+    fn open_uni(&self, deadline: Duration)
+        -> Pin<Box<dyn Future<Output = Result<quinn::SendStream, SdkTransferError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            ResilientDataLanes::open_uni(self, deadline).await
+                .map_err(|_| SdkTransferError::DataConnection)
+        })
+    }
+    fn accept_uni(&self, deadline: Duration)
+        -> Pin<Box<dyn Future<Output = Result<quinn::RecvStream, SdkTransferError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            ResilientDataLanes::accept_uni(self, deadline).await
+                .map_err(|_| SdkTransferError::DataConnection)
+        })
+    }
+}
+
+impl AuthenticatedDataStreams for ModernDataLanes {
+    fn open_uni(&self, deadline: Duration)
+        -> Pin<Box<dyn Future<Output = Result<quinn::SendStream, SdkTransferError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            ModernDataLanes::open_uni(self, deadline).await
+                .map_err(|_| SdkTransferError::DataConnection)
+        })
+    }
+    fn accept_uni(&self, deadline: Duration)
+        -> Pin<Box<dyn Future<Output = Result<quinn::RecvStream, SdkTransferError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            ModernDataLanes::accept_uni(self, deadline).await
+                .map_err(|_| SdkTransferError::DataConnection)
+        })
+    }
+}
+
+impl<T: AuthenticatedDataStreams + ?Sized> AuthenticatedDataStreams for Arc<T> {
+    fn open_uni(&self, deadline: Duration)
+        -> Pin<Box<dyn Future<Output = Result<quinn::SendStream, SdkTransferError>> + Send + '_>>
+    {
+        T::open_uni(self, deadline)
+    }
+    fn accept_uni(&self, deadline: Duration)
+        -> Pin<Box<dyn Future<Output = Result<quinn::RecvStream, SdkTransferError>> + Send + '_>>
+    {
+        T::accept_uni(self, deadline)
     }
 }
 
@@ -164,7 +230,7 @@ pub async fn send_via_sdk(
 /// still owns chunk ACK/retransmit and cannot yet resume an interrupted file.
 pub async fn send_via_managed_sdk(
     session: &dyn AuthenticatedSession,
-    lanes: &ResilientDataLanes,
+    lanes: &dyn AuthenticatedDataStreams,
     root: &SharedRoot,
     source: &Path,
     remote_destination: &str,
@@ -175,7 +241,7 @@ pub async fn send_via_managed_sdk(
 
 async fn send_on_managed_lane(
     session: &dyn AuthenticatedSession,
-    lanes: Option<&ResilientDataLanes>,
+    lanes: Option<&dyn AuthenticatedDataStreams>,
     root: &SharedRoot,
     source: &Path,
     remote_destination: &str,
@@ -185,8 +251,7 @@ async fn send_on_managed_lane(
         .map_err(|_| SdkTransferError::ControlConnection)?;
     let mut control = ControlIo::new(control_recv, control_send);
     let mut data = if let Some(pool) = lanes {
-        pool.open_uni(Duration::from_secs(30)).await
-            .map_err(|_| SdkTransferError::DataConnection)?
+        pool.open_uni(Duration::from_secs(30)).await?
     } else {
         session.initial_data().ok_or(SdkTransferError::DataConnection)?
             .open_uni().await.map_err(|_| SdkTransferError::DataConnection)?
@@ -259,12 +324,11 @@ pub enum IncomingResult {
 
 async fn read_data_preface(
     session: &dyn AuthenticatedSession,
-    lanes: Option<&ResilientDataLanes>,
+    lanes: Option<&dyn AuthenticatedDataStreams>,
     request_id: u64,
 ) -> Result<quinn::RecvStream, SdkTransferError> {
     let mut data = if let Some(pool) = lanes {
-        pool.accept_uni(Duration::from_secs(120)).await
-            .map_err(|_| SdkTransferError::DataConnection)?
+        pool.accept_uni(Duration::from_secs(120)).await?
     } else {
         session.initial_data().ok_or(SdkTransferError::DataConnection)?
             .accept_uni().await.map_err(|_| SdkTransferError::DataConnection)?
@@ -399,7 +463,7 @@ pub async fn serve_control_stream_with_lease(
     send: quinn::SendStream,
     recv: quinn::RecvStream,
     lease: Option<(&crate::lease::TransferLease, &RemoteLeaseGrant)>,
-    lanes: Option<&ResilientDataLanes>,
+    lanes: Option<&dyn AuthenticatedDataStreams>,
 ) -> Result<IncomingResult, SdkTransferError> {
     let mut control = ControlIo::new(recv, send);
     let first = read_frame(&mut control).await?;
