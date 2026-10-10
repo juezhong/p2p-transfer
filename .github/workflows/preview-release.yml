@@ -73,13 +73,13 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-src-${{ runner.os }}-${{ hashFiles('**/Cargo.toml') }}
+          key: cargo-src-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
           restore-keys: |
             cargo-src-${{ runner.os }}-
       - name: Test real workspace including two-process localhost file transfers
-        run: cargo test --workspace --target ${{ matrix.target }}
+        run: cargo test --locked --workspace --target ${{ matrix.target }}
       - name: Build optimized CLI
-        run: cargo build -p transfer-cli --bin p2p-transfer --release --target ${{ matrix.target }}
+        run: cargo build --locked -p transfer-cli --bin p2p-transfer --release --target ${{ matrix.target }}
       - name: Verify MUSL ELF has no dynamic loader
         if: contains(matrix.target, 'musl')
         shell: bash
