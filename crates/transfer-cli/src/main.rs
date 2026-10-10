@@ -10,7 +10,6 @@ mod shell;
 
 use std::{
     io::{self, Write},
-    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -35,12 +34,6 @@ fn prompt(label: &str) -> CliResult<String> {
         return Err("输入结束，操作已取消".into());
     }
     Ok(buf.trim().to_owned())
-}
-
-fn trust_peer_der(bytes: Vec<u8>) -> CliResult<Arc<rustls::RootCertStore>> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(bytes.into()).map_err(debug_error)?;
-    Ok(Arc::new(roots))
 }
 
 fn help() {

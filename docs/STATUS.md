@@ -204,3 +204,10 @@
 - 新增 **sealed `AuthenticatedDataStreams`**：兼容旧 `ResilientDataLanes` 与新 SDK Data pool，禁止第三方裸 QUIC 流伪装认证 Data。
 - 集成测试补充真正 `send_via_managed_sdk` + `serve_control_stream_with_lease` 经过认证 Data 池上的 Control ACK/数据落盘/SHA-256 检验。
 - 本批仍未切换正式 CLI 创建/加入，也未完成真实 NAT/CGNAT、Go v0.16.4 文件断线重发和取消的现场验收。
+
+## 2026-10-11：正式 CLI 接入 SDK #71 的连接、Control 与 Data
+
+- SDK #71/Transfer #30~#32 已通过跨平台回归；本批将 CLI 真实创建/加入从手工 `gather_interfaces → nominate_first → TLS/Quinn → VerifiedManualSession` 更换为 SDK `begin_creator / begin_joiner → 用户逐端核对 6 位码 → connect_transport`。由 SDK 管理端口映射、实际 ICE、JOIN 提前接纳/动态 prflx 复验、QUIC Control 方向与 UDP Owner 生命周期。
+- CLI 保留无参数菜单、用户共享目录授权、私下 INVITE/REPLY 和配对码确认；业务 Shell、PUT/GET、递归、Tab 补全和租约保持原命令行为。
+- 通过 Transfer #32 `ModernDataLanes` 托管最多 4 条 SDK mTLS PIN+Session HMAC 认证的 Data QUIC；Shell 与补全通过 sealed `AuthenticatedSession` 进行 Control RPC，文件字节不得放在 Control。
+- 需五平台真实**双 CLI 进程**测试及 Rust Checks 全绿后合并；公网 NAT/CGNAT/IPv6 防火墙以及 Go v0.16.4 的 CANCEL/故障重传/性能验收仍待完成。
