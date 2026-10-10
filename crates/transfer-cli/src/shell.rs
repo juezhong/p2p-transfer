@@ -23,7 +23,7 @@ use transfer_core::{
 };
 
 use crate::{completion::{self, CompletionQuery, ShellCompleter}, interactive::ActivePeer, CliResult};
-use p2p_sdk::resilient_data::ResilientDataLanes;
+use transfer_core::transport_lanes::TransferDataLanes;
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
@@ -113,8 +113,8 @@ type PendingDownloads = Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>>;
 /// file is still transferred through separate Control/Data QUIC streams,
 /// with per-file SHA-256 and no-clobber commit.
 async fn put_path(
-    session: &p2p_sdk::verified_session::VerifiedManualSession,
-    lanes: &ResilientDataLanes,
+    session: &transfer_core::transport_lanes::TransferSession,
+    lanes: &TransferDataLanes,
     root: &SharedRoot,
     source: &Path,
     destination: &Path,
@@ -155,7 +155,7 @@ async fn put_path(
 }
 
 async fn get_one_file(
-    session: &p2p_sdk::verified_session::VerifiedManualSession,
+    session: &transfer_core::transport_lanes::TransferSession,
     source: &Path,
     destination: &Path,
     pending: &PendingDownloads,
@@ -195,7 +195,7 @@ async fn get_one_file(
 /// unreadable remote object is a file. Only fallback to GET when remote
 /// explicitly reports the initial path is not a listable directory.
 async fn get_path(
-    session: &p2p_sdk::verified_session::VerifiedManualSession,
+    session: &transfer_core::transport_lanes::TransferSession,
     root: &SharedRoot,
     source: &Path,
     destination: &Path,
@@ -236,7 +236,7 @@ async fn get_path(
 /// guard stays alive for a whole directory transfer, not each individual
 /// file, so unrelated transfer tasks cannot overlap the Data QUIC lane.
 async fn with_batch_lease<F>(
-    session: &p2p_sdk::verified_session::VerifiedManualSession,
+    session: &transfer_core::transport_lanes::TransferSession,
     arbiter: &TransferLease,
     is_creator: bool,
     batch_id: u64,
@@ -333,9 +333,9 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                     }
                     Err(_) => {
                         return Err(format!(
-                            "Control QUIC 连接已断开：{:?}；Data QUIC 状态：{:?}",
+                            "Control QUIC 连接已断开：{:?}；Data 活跃连接：{}",
                             session.control().close_reason(),
-                            session.data().close_reason(),
+                            data_lanes.available().await.len(),
                         ));
                     },
                 }
@@ -359,10 +359,10 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                     "status" => {
                         let actual = data_lanes.available().await.len();
                         println!("已认证 Data QUIC 活跃连接：{}/4", actual);
-                        println!("角色={}；Control QUIC={}；基础 Data QUIC={}；UDP {} -> {}",
+                        println!("角色={}；Control QUIC={}；Data 状态={}；UDP {} -> {}",
                             peer.role,
                             if session.control().close_reason().is_none() { "connected" } else { "closed" },
-                            if session.data().close_reason().is_none() { "connected" } else { "closed" },
+                            if actual > 0 { "connected" } else { "reconnecting" },
                             peer.local_address, peer.peer_address);
                         println!("文件任务活动={}；本地共享根目录已授权", active.load(Ordering::SeqCst));
                         println!("当前远端目录=/{}；当前本地相对目录=/{}",
