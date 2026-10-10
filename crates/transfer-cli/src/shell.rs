@@ -23,7 +23,7 @@ use transfer_core::{
 };
 
 use crate::{completion::{self, CompletionQuery, ShellCompleter}, interactive::ActivePeer, CliResult};
-use p2p_sdk::resilient_data::ResilientDataLanes;
+use transfer_core::data_lane_pool::ResilientDataLanes;
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
