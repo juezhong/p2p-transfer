@@ -34,6 +34,12 @@ jobs:
           test "$(wc -l < sdk-versions.txt)" -eq 1
           echo '=== Multiple versions (may be required by transitive semver constraints) ==='
           cargo tree --workspace --duplicates
+      - name: Capture resolved Cargo.lock for reproducible app builds
+        shell: bash
+        run: |
+          echo CARGO_LOCK_CAPTURE_BEGIN
+          cat Cargo.lock
+          echo CARGO_LOCK_CAPTURE_END
       - name: 自动格式化 Rust 源码
         run: cargo fmt --all
       - name: 检查格式化后的结果
