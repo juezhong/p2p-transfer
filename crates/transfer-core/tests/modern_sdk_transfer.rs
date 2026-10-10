@@ -4,7 +4,6 @@
 //! on-demand Data QUIC. Local loopback is NOT public NAT validation.
 
 use std::{path::Path, sync::Arc, time::Duration};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use p2p_sdk::{direct_peer::{begin_creator, begin_joiner}, transport_session::ConnectedTransportPeer};
 use transfer_core::{
