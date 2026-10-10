@@ -26,11 +26,14 @@ async fn wait_data(
 }
 
 async fn send_one(
-    sender: &ConnectedTransportPeer, receiver: &ConnectedTransportPeer,
-    send_lane: &quinn::Connection, recv_lane: &quinn::Connection,
-    source_root: &SharedRoot, destination_root: &SharedRoot,
+    peers: (&ConnectedTransportPeer, &ConnectedTransportPeer),
+    lanes: (&quinn::Connection, &quinn::Connection),
+    roots: (&SharedRoot, &SharedRoot),
     name: &str, remote_name: &str, request: u64,
 ) -> (TransferReceipt, TransferReceipt) {
+    let (sender, receiver) = peers;
+    let (send_lane, recv_lane) = lanes;
+    let (source_root, destination_root) = roots;
     tokio::join!(
         async {
             let (tx, rx) = sender.control.open_bi().await.unwrap();
@@ -122,9 +125,8 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                     );
 
                     let (sent, received) = send_one(
-                        &creator, &joiner, &creator_data, &joiner_data,
-                        &source, &destination,
-                        "中文名.txt", "收到 文件.txt", 11,
+                        (&creator, &joiner), (&creator_data, &joiner_data),
+                        (&source, &destination), "中文名.txt", "收到 文件.txt", 11,
                     ).await;
                     assert_eq!(sent, received);
                     assert_eq!(sent.bytes, payload.len() as u64);
@@ -136,9 +138,8 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                     // The same authenticated Control/Data connections also
                     // support reverse-direction GET without re-pairing.
                     let (sent_back, received_back) = send_one(
-                        &joiner, &creator, &joiner_data, &creator_data,
-                        &destination, &source,
-                        "empty.bin", "空文件.bin", 12,
+                        (&joiner, &creator), (&joiner_data, &creator_data),
+                        (&destination, &source), "empty.bin", "空文件.bin", 12,
                     ).await;
                     assert_eq!(sent_back, received_back);
                     assert_eq!(sent_back.bytes, 0);
