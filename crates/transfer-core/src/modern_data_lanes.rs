@@ -8,7 +8,9 @@ use std::{
     time::Duration,
 };
 
-use p2p_sdk::transport_session::{ConnectedTransportPeer, ManagedAuthenticatedLink};
+use p2p_sdk::transport_session::{
+    ConnectedTransportPeer, ManagedAuthenticatedLink, ManagedLinkPhase,
+};
 use quinn::{Connection, RecvStream, SendStream};
 use tokio::{sync::Mutex, task::JoinSet, time::timeout};
 
@@ -20,6 +22,19 @@ pub enum ModernLaneError {
     ControlLost,
     ShuttingDown,
     TimedOut,
+}
+
+/// A per-link snapshot. The SDK does not yet publish each independent
+/// auxiliary UDP Owner's local port; never infer it from Control's socket.
+#[derive(Clone, Debug)]
+pub struct ModernLaneStatus {
+    pub index: usize,
+    pub phase: ManagedLinkPhase,
+    pub generation: u64,
+    pub local_ip: Option<std::net::IpAddr>,
+    pub remote_udp: Option<std::net::SocketAddr>,
+    pub connection_id: Option<usize>,
+    pub last_error: Option<String>,
 }
 
 /// One SDK manager per application-requested Data connection (up to four).
@@ -50,6 +65,23 @@ impl ModernDataLanes {
     }
 
     pub fn desired(&self) -> usize { self.desired }
+
+    pub async fn statuses(&self) -> Vec<ModernLaneStatus> {
+        let guards = self.handles.lock().await;
+        guards.iter().enumerate().map(|(index, handle)| {
+            let state = handle.subscribe();
+            let current = state.borrow().clone();
+            ModernLaneStatus {
+                index: index + 1,
+                phase: current.phase,
+                generation: current.generation,
+                local_ip: current.connection.as_ref().and_then(Connection::local_ip),
+                remote_udp: current.connection.as_ref().map(Connection::remote_address),
+                connection_id: current.connection.as_ref().map(Connection::stable_id),
+                last_error: current.last_error.map(|error| format!("{error:?}")),
+            }
+        }).collect()
+    }
 
     pub async fn available(&self) -> Vec<Connection> {
         let handles = self.handles.lock().await;

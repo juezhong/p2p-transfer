@@ -14,6 +14,7 @@ const LIST_TYPES_OP: u8 = 3;
 const MKDIR_OP: u8 = 4;
 const ACQUIRE_TRANSFER_OP: u8 = 5;
 const RELEASE_TRANSFER_OP: u8 = 6;
+const ROOT_INFO_OP: u8 = 7;
 const MAX_ENTRIES: usize = 8192;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +26,8 @@ pub enum RpcRequest {
     /// Grant/Release are only honored by the session's creating side.
     AcquireTransfer,
     ReleaseTransfer,
+    /// Returns only the explicitly authorized root, not arbitrary host paths.
+    RootInfo,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +78,7 @@ impl RpcRequest {
             }
             Self::AcquireTransfer => bytes.push(ACQUIRE_TRANSFER_OP),
             Self::ReleaseTransfer => bytes.push(RELEASE_TRANSFER_OP),
+            Self::RootInfo => bytes.push(ROOT_INFO_OP),
             Self::Get { source, destination } => {
                 bytes.push(GET_OP);
                 push_string(&mut bytes, source)?;
@@ -99,6 +103,7 @@ impl RpcRequest {
             },
             ACQUIRE_TRANSFER_OP => Self::AcquireTransfer,
             RELEASE_TRANSFER_OP => Self::ReleaseTransfer,
+            ROOT_INFO_OP => Self::RootInfo,
             GET_OP => Self::Get {
                 source: read_string(bytes, &mut pos)?.to_owned(),
                 destination: read_string(bytes, &mut pos)?.to_owned(),
@@ -218,6 +223,7 @@ mod tests {
             RpcRequest::ListTypes { directory: "子目录".into() },
             RpcRequest::MakeDirectory { directory: "new/子目录".into() },
             RpcRequest::AcquireTransfer,
+            RpcRequest::RootInfo,
             RpcRequest::ReleaseTransfer,
         ] {
             assert_eq!(RpcRequest::decode(&r.encode().unwrap()), Ok(r));

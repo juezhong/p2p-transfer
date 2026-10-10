@@ -29,17 +29,13 @@ pub struct ActivePeer {
 fn verify_user(
     mut confirmation: ManualConfirmation, displayed_code: &str,
 ) -> CliResult<ManualConfirmation> {
-    // Never derive approval from INVITE or REPLY. A human verifies the code
-    // through a trusted independent channel before SDK starts ICE/QUIC.
-    println!("双方设备应显示相同的 6 位配对核对码：{displayed_code}");
-    println!("请通过另一可信渠道（例如语音）核对两台设备的数字是否一致。");
-    println!("这不是邀请码的一部分；它用来防止首次配对被第三方替换。");
-    let answer = prompt("已经与另一台设备核对且完全一致？输入 yes 继续，其余输入取消：")?;
-    if answer != "yes" {
-        return Err("用户没有确认双方配对核对码一致；拒绝建立连接".to_owned());
-    }
+    // Match Go v0.16.4's INVITE/REPLY-only user flow. No human SAS prompt.
+    // A substituted first-time invitation may allow MITM, so only exchange
+    // invitation/reply codes over a confidential, trusted out-of-band channel.
+    println!("[配对] INVITE/REPLY 已验证，正在连接。");
+    println!("[安全提示] 已省略六位人工核对；请确保两个连接码通过可信、私密渠道交换。");
     confirmation.confirm(displayed_code)
-        .map_err(|_| "配对核对未通过，取消连接".to_owned())?;
+        .map_err(|_| "INVITE/REPLY 绑定校验失败，拒绝连接".to_owned())?;
     Ok(confirmation)
 }
 

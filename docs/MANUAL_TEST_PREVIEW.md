@@ -1,10 +1,10 @@
-# Rust Transfer 双机联机测试：无参数 Go 风格 CLI（v0.1.0-test.4 预览）
+# Rust Transfer 双机联机测试：无参数 Go 风格 CLI（v0.1.0-test.5 预览）
 
 > **目前尚未达到 Go v0.16.4 完整功能对等，不是稳定 Release。** 目录浏览、PUT/GET、递归目录、手动配对/ICE、双向 mTLS、控制/数据独立 QUIC 已通过五平台本机双进程自动测试；真正不同路由器的公网 NAT 穿透还没有用户现场结果。
 
 ## 获取五平台构建
 
-优先从 [GitHub Release v0.1.0-test.4](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.0-test.4) 的 **Assets** 下载所属架构的正式预览二进制和 `SHA256SUMS.txt`。如果本次七目标发布工作流尚未结束，请不要下载旧的 v0.1.0-test.3 进行新版 SDK 测试；可在 [Release Actions](https://github.com/juezhong/p2p-transfer/actions/workflows/preview-release.yml) 中检查进度。
+优先从 [GitHub Release v0.1.0-test.5](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.0-test.5) 的 **Assets** 下载所属架构的正式预览二进制和 `SHA256SUMS.txt`。如果本次七目标发布工作流尚未结束，请不要下载旧的 v0.1.0-test.3 进行新版 SDK 测试；可在 [Release Actions](https://github.com/juezhong/p2p-transfer/actions/workflows/preview-release.yml) 中检查进度。
 
 - Windows x86_64：`p2p-transfer-windows-x86_64.exe`
 - macOS Intel x86_64：`p2p-transfer-macos-x86_64`
@@ -78,3 +78,10 @@ quit
 ## 尚缺的功能
 
 当前 SDK 仍需多网卡并行候选、ICE consent / restart、PCP/NAT-PMP 自动网关发现/续期、UPnP，以及各 NAT 真实网络验证。Transfer 仍需断线后的未确认块恢复、最多四条 Data QUIC 的动态修复、Tab 自动补全、2GiB 五平台性能回归。TUI/GUI 依用户要求后置，**这些验收完成前不创建稳定 Release**。
+
+## test.5 交互行为
+
+- 输入 INVITE/REPLY 后按 Go v0.16.4 直接连接，**不再提示六位码或要求 yes**；目录授权的 yes 仍必须输入。安全代价：首次设备身份不再通过独立的比较码确认；只能在可信且私密的渠道交换完整连接码，否则可能出现首次配对的中间人替换。
+- `status`：显示 ICE/Control 的双方 UDP IP/端口、拨号方向、候选类型、STUN/网关信息、每条 Data QUIC 的连接标识、本地 IP 与远端 UDP 地址，以及双方**本次明确授权的真实共享根目录**和会话租约拥有方。SDK 尚未公开 Data owner 的本地端口，本版无法完整显示每一条 Data 的本地 UDP 源端口。
+- `put/get`：命令行暂停下一提示符直至任务结束/取消；每秒主动打印基于接收端实际写盘 ACK 的百分比、MiB、速率、已用时间与 ETA；其他 RPC 不被暂停。Ctrl-C 可取消当前本地任务；远端可靠 CANCEL 与断点续传仍未完成。
+- 一方 `quit` 时，另一方提示对端已断开，保留本地 shell 只接受 `quit` 退出；不会因正常 QUIC 关闭打印误导性网络错误。请用两台设备反复验证退出过程没有残留 `.part`、Data socket 或占用端口。
