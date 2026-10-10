@@ -11,9 +11,9 @@ sha2 = "0.10"
 getrandom = "0.3"
 
 
-tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
+tokio = { version = "1", features = ["io-util", "macros", "rt", "sync", "time", "net"] }
 quinn = "0.11"
-p2p-sdk = { git = "https://github.com/juezhong/p2p-sdk", rev = "65bfa41dae1303d91b0ef3e97ccffb0e6aa94966" }
+p2p-sdk = { git = "https://github.com/juezhong/p2p-sdk", rev = "193be7e04ece47afe53a9d0a4e2b0f4574f5ffbc" }
 
 [dev-dependencies]
 quinn = "0.11"
