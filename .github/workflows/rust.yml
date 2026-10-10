@@ -29,7 +29,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo tree --workspace --prefix none | grep '^p2p-sdk v' | sed 's/ (\*)$//' | sort -u > sdk-versions.txt
+          CARGO_TERM_COLOR=never cargo tree --workspace --prefix none | grep '^p2p-sdk v' | sed 's/ [(][*][)]$//' | sort -u > sdk-versions.txt
           cat sdk-versions.txt
           test "$(wc -l < sdk-versions.txt)" -eq 1
           echo '=== Multiple versions (may be required by transitive semver constraints) ==='
