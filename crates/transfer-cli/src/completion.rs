@@ -126,7 +126,7 @@ fn encode_argument(path: &str, original: &str) -> String {
 
 pub async fn resolve(
     query: CompletionQuery,
-    session: &p2p_sdk::verified_session::VerifiedManualSession,
+    session: &transfer_core::transport_lanes::TransferSession,
     root: &SharedRoot,
     local_cwd: &Path,
     remote_cwd: &Path,
@@ -138,7 +138,7 @@ pub async fn resolve(
 async fn complete(
     line: &str,
     pos: usize,
-    session: &p2p_sdk::verified_session::VerifiedManualSession,
+    session: &transfer_core::transport_lanes::TransferSession,
     root: &SharedRoot,
     local_cwd: &Path,
     remote_cwd: &Path,
