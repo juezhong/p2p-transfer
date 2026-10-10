@@ -1,18 +1,18 @@
-# Rust Transfer 双机联机测试：无参数 Go 风格 CLI（开发预览）
+# Rust Transfer 双机联机测试：无参数 Go 风格 CLI（v0.1.0-test.4 预览）
 
 > **目前尚未达到 Go v0.16.4 完整功能对等，不是稳定 Release。** 目录浏览、PUT/GET、递归目录、手动配对/ICE、双向 mTLS、控制/数据独立 QUIC 已通过五平台本机双进程自动测试；真正不同路由器的公网 NAT 穿透还没有用户现场结果。
 
 ## 获取五平台构建
 
-打开 [p2p-transfer GitHub Actions](https://github.com/juezhong/p2p-transfer/actions/workflows/debug.yml)，选择最新 **全部成功** 的 `Transfer debug builds (five targets)`，从 Artifacts 下载：
+优先从 [GitHub Release v0.1.0-test.4](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.0-test.4) 的 **Assets** 下载所属架构的正式预览二进制和 `SHA256SUMS.txt`。如果本次七目标发布工作流尚未结束，请不要下载旧的 v0.1.0-test.3 进行新版 SDK 测试；可在 [Release Actions](https://github.com/juezhong/p2p-transfer/actions/workflows/preview-release.yml) 中检查进度。
 
-- Windows x86_64：`p2p-transfer-debug-windows-x86_64`
-- macOS Intel x86_64：`p2p-transfer-debug-macos-x86_64`
-- macOS Apple Silicon ARM64：`p2p-transfer-debug-macos-aarch64`
-- Linux x86_64：`p2p-transfer-debug-linux-x86_64`
-- Linux ARM64：`p2p-transfer-debug-linux-aarch64`
+- Windows x86_64：`p2p-transfer-windows-x86_64.exe`
+- macOS Intel x86_64：`p2p-transfer-macos-x86_64`
+- macOS Apple Silicon ARM64：`p2p-transfer-macos-aarch64`
+- Linux x86_64：`p2p-transfer-linux-x86_64`（GNU/glibc）或 `p2p-transfer-linux-x86_64-musl`（静态）
+- Linux ARM64：`p2p-transfer-linux-aarch64`（GNU/glibc）或 `p2p-transfer-linux-aarch64-musl`（静态，RK3568 优先尝试）
 
-打包的只是 Debug 程序，未签名。实际可用性要看对应分支、架构的 CI 和真实网络测试，不能依据仅有构建文件判断。
+这些附件来自经七目标测试的优化构建，**仍为未签名的测试版**；不代表已经在真实公网 NAT/CGNAT 上验证成功。
 
 ## 与 Go 版一致：直接运行，无需任何参数
 
