@@ -211,3 +211,9 @@
 - CLI 保留无参数菜单、用户共享目录授权、私下 INVITE/REPLY 和配对码确认；业务 Shell、PUT/GET、递归、Tab 补全和租约保持原命令行为。
 - 通过 Transfer #32 `ModernDataLanes` 托管最多 4 条 SDK mTLS PIN+Session HMAC 认证的 Data QUIC；Shell 与补全通过 sealed `AuthenticatedSession` 进行 Control RPC，文件字节不得放在 Control。
 - 需五平台真实**双 CLI 进程**测试及 Rust Checks 全绿后合并；公网 NAT/CGNAT/IPv6 防火墙以及 Go v0.16.4 的 CANCEL/故障重传/性能验收仍待完成。
+
+## 2026-10-11：来自 Linux x86_64 ↔ RK3568 ARM64 的首次真实现场记录与修复
+
+- 用户真实 LAN 中双方 IPv4 ICE nominated、Control QUIC 方向一致、4/4 认证 Data QUIC 成功；`ls` 确认远程文件系统可访问。但 2 GiB 任务没有完成且双方先后执行不同方向 put/get 导致租约 busy，随后 `quit` 关闭导致对端 auxiliary connection closed；**没有证据表明是独立的 NAT 失败**。
+- PR #34 改为 Go v0.16.4 的前台 PUT/GET、每秒真实写盘 ACK 进度、详细 status 和授权的远端真实目录 RPC、对端掉线提示/统一清理、GET 取消防遗留待决应答，以及省略六位核对交互（完全保留 SDK TLS PIN/HMAC/ICE，但首次身份抗中间人能力取决于可信的 INVITE/REPLY 交换）。
+- **尚未实现/验证：** Data 独立本机 UDP owner 源端口的诊断 API、真正 2 GiB 完整成功率/吞吐、断线中途未确认 chunk 的恢复、可靠远端 CANCEL、多路 striping 以及真实 CGNAT/IPv6 stateful firewall。必须待 CI 成功后发布 test.5 供实体设备复测。
