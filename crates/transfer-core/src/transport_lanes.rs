@@ -63,9 +63,15 @@ impl TransferDataLanes {
                 let start = self.next.fetch_add(1, Ordering::Relaxed) % links.len();
                 for offset in 0..links.len() {
                     let conn = &links[(start + offset) % links.len()];
-                    if let Ok(stream) = conn.open_uni().await {
-                        return Ok(stream);
-                    }
+                    // 单条 QUIC 可能因流数量限制阻塞，不能卡住其它健康 lane。
+                    let remaining = expires.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() { return Err(LaneError::Timeout); }
+                    let result = tokio::select! {
+                        _ = self.control.closed() => return Err(LaneError::Disconnected),
+                        result = timeout(remaining.min(Duration::from_millis(400)), conn.open_uni()) =>
+                            result,
+                    };
+                    if let Ok(Ok(stream)) = result { return Ok(stream); }
                 }
             }
             if Instant::now() >= expires { return Err(LaneError::Timeout); }
@@ -90,7 +96,7 @@ impl TransferDataLanes {
             if !attempts.is_empty() {
                 let answer = tokio::select! {
                     _ = self.control.closed() => return Err(LaneError::Disconnected),
-                    result = timeout(Duration::from_millis(150), attempts.join_next()) => result,
+                    result = timeout(Duration::from_millis(400), attempts.join_next()) => result,
                 };
                 if let Ok(Some(Ok(Ok(stream)))) = answer {
                     attempts.abort_all();
