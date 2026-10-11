@@ -1,12 +1,13 @@
 //! Application-level authenticated transfer cancellation (not QUIC shutdown).
 //! A cancellation can race the original GET/PUT control offer: bounded
 //! tombstones prevent the late offer from restarting an already canceled job.
-use std::{collections::{HashMap, VecDeque, HashSet}, sync::Mutex};
+use std::{collections::{HashMap, VecDeque, HashSet}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}};
 use tokio::sync::watch;
 
 #[derive(Default)]
 pub struct TransferCancels {
     inner: Mutex<CancelState>,
+    local_task_running: Arc<AtomicBool>,
 }
 #[derive(Default)]
 struct CancelState {
@@ -44,6 +45,14 @@ impl Drop for CancellationGuard<'_> {
     }
 }
 impl TransferCancels {
+    // 本机发起的文件任务正在执行时，拒绝对端远程取消请求。
+    pub fn with_local_task(local_task_running: Arc<AtomicBool>) -> Self {
+        Self { inner: Mutex::default(), local_task_running }
+    }
+    pub fn remote_cancel_allowed(&self) -> bool {
+        !self.local_task_running.load(Ordering::SeqCst)
+    }
+
     /// IDs of live send or receive tasks. Used to permit either peer to
     /// cancel an inbound transfer before the progress counter begins.
     pub fn active_ids(&self) -> Vec<u64> {
@@ -106,6 +115,16 @@ pub async fn canceled(mut receiver: watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_owner_blocks_peer_cancel() {
+        let running = Arc::new(AtomicBool::new(false));
+        let registry = TransferCancels::with_local_task(Arc::clone(&running));
+        assert!(registry.remote_cancel_allowed());
+        running.store(true, Ordering::SeqCst);
+        assert!(!registry.remote_cancel_allowed());
+        running.store(false, Ordering::SeqCst);
+        assert!(registry.remote_cancel_allowed());
+    }
     #[tokio::test]
     async fn cancellation_notifies_active_and_early_registration() {
         let registry = TransferCancels::default();
