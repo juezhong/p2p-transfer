@@ -687,7 +687,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         // 正常退出不能无意中结束另一设备发起的任务。
                         if !disconnected && session.control().close_reason().is_none() {
                             let status = if is_creator {
-                                Some(authoritative_task_status(&arbiter, &remote_grant.lock().await))
+                                Some(authoritative_task_status(&arbiter, &*remote_grant.lock().await))
                             } else {
                                 match tokio::time::timeout(Duration::from_secs(3),
                                     task_status_via_sdk(&session, next_id())).await {
@@ -767,7 +767,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         println!("────────── 文件任务 ──────────");
                         // 创建方裁决单一任务；加入方从创建方读取同一个任务快照。
                         let shared_task = if is_creator {
-                            Some(authoritative_task_status(&arbiter, &remote_grant.lock().await))
+                            Some(authoritative_task_status(&arbiter, &*remote_grant.lock().await))
                         } else {
                             match tokio::time::timeout(Duration::from_secs(3),
                                 task_status_via_sdk(&session, next_id())).await {
