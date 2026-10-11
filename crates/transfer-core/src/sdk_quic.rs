@@ -262,7 +262,7 @@ pub async fn send_via_managed_sdk_cancellable(
     cancels: &TransferCancels,
 ) -> Result<TransferReceipt, SdkTransferError> {
     let (source, remote_destination) = paths;
-    let (_guard, rx) = cancels.register(request_id)
+    let (_guard, rx) = cancels.register_local(request_id)
         .ok_or(SdkTransferError::InvalidDataStream)?;
     let result = tokio::select! {
         biased;
@@ -407,6 +407,53 @@ impl Drop for ExpectedLocalGet {
 }
 
 pub type RemoteLeaseGrant = std::sync::Arc<tokio::sync::Mutex<RemoteLeaseState>>;
+
+/// 由创建方统一维护的会话任务状态，双方使用同一个任务发起方及编号。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionTaskStatus {
+    Idle,
+    Creator(u64),
+    Joiner(u64),
+}
+impl SessionTaskStatus {
+    fn encode(self) -> Vec<u8> {
+        match self {
+            Self::Idle => b"IDLE".to_vec(),
+            Self::Creator(id) => format!("CREATOR:{id}").into_bytes(),
+            Self::Joiner(id) => format!("JOINER:{id}").into_bytes(),
+        }
+    }
+    fn decode(payload: &[u8]) -> Result<Self, SdkTransferError> {
+        if payload == b"IDLE" { return Ok(Self::Idle); }
+        let value = std::str::from_utf8(payload).map_err(|_| SdkTransferError::InvalidDataStream)?;
+        let (role, number) = value.split_once(':').ok_or(SdkTransferError::InvalidDataStream)?;
+        let id: u64 = number.parse().map_err(|_| SdkTransferError::InvalidDataStream)?;
+        if id == 0 { return Err(SdkTransferError::InvalidDataStream); }
+        match role {
+            "CREATOR" => Ok(Self::Creator(id)),
+            "JOINER" => Ok(Self::Joiner(id)),
+            _ => Err(SdkTransferError::InvalidDataStream),
+        }
+    }
+    pub fn owner_label(self) -> &'static str {
+        match self {
+            Self::Idle => "无",
+            Self::Creator(_) => "创建方",
+            Self::Joiner(_) => "加入方",
+        }
+    }
+    pub fn batch_id(self) -> Option<u64> {
+        match self { Self::Idle => None, Self::Creator(id) | Self::Joiner(id) => Some(id) }
+    }
+}
+pub fn authoritative_task_status(
+    arbiter: &crate::lease::TransferLease,
+    grants: &RemoteLeaseState,
+) -> SessionTaskStatus {
+    if let Some(id) = grants.active_request() { SessionTaskStatus::Joiner(id) }
+    else if let Some(id) = arbiter.active_request() { SessionTaskStatus::Creator(id) }
+    else { SessionTaskStatus::Idle }
+}
 
 impl RemoteLeaseState {
     /// Current remote-granted batch, if any (for human-readable status).
@@ -640,6 +687,15 @@ pub async fn serve_control_stream_cancellable(
                     }
                 }
                 Ok(RpcRequest::CancelTransfer) => {
+                    // 不能将已认证连接误当作可终止对端发起任务的权限。
+                    let peer_owns_batch = if let Some((_, remote_grant)) = lease {
+                        remote_grant.lock().await.active_request().is_some()
+                    } else { true };
+                    if !peer_owns_batch || cancels.is_some_and(|r| !r.remote_cancel_allowed()) {
+                        write_frame(&mut control, FrameKind::Error, request_id,
+                            b"only initiating peer may cancel".to_vec()).await?;
+                        return Ok(IncomingResult::DirectoryListed);
+                    }
                     // Only authenticated session peers can issue this RPC.
                     // Unknown IDs install a bounded tombstone: cancel-before-
                     // offer cannot resurrect the transfer.
@@ -670,6 +726,17 @@ pub async fn serve_control_stream_cancellable(
                         // tombstone is recorded, not a completed transfer.
                         write_frame(&mut control, FrameKind::RpcResponse, request_id,
                             b"PENDING".to_vec()).await?;
+                    }
+                    Ok(IncomingResult::DirectoryListed)
+                }
+                Ok(RpcRequest::TransferStatus) => {
+                    if let Some((arbiter, remote_grant)) = lease {
+                        let state = authoritative_task_status(arbiter, &*remote_grant.lock().await);
+                        write_frame(&mut control, FrameKind::RpcResponse, request_id,
+                            state.encode()).await?;
+                    } else {
+                        write_frame(&mut control, FrameKind::Error, request_id,
+                            b"ask creator for task status".to_vec()).await?;
                     }
                     Ok(IncomingResult::DirectoryListed)
                 }
@@ -874,6 +941,14 @@ pub async fn mkdir_via_sdk(
     Ok(())
 }
 
+pub async fn task_status_via_sdk(
+    session: &dyn AuthenticatedSession,
+    request_id: u64,
+) -> Result<SessionTaskStatus, SdkTransferError> {
+    let response = request_rpc(session, RpcRequest::TransferStatus, request_id).await?;
+    SessionTaskStatus::decode(&response.payload)
+}
+
 /// Joiner must obtain a server-authoritative grant before an entire PUT/GET
 /// batch, not once per individual file. This uses Control QUIC only.
 pub async fn acquire_transfer_via_sdk(
@@ -918,6 +993,23 @@ pub async fn release_transfer_via_sdk(
 mod transfer_lease_rpc_tests {
     use super::*;
 
+    #[test]
+    fn authoritative_status_tracks_one_owner_and_roundtrips() {
+        let lease = crate::lease::TransferLease::new();
+        let mut remote = RemoteLeaseState::default();
+        assert_eq!(authoritative_task_status(&lease, &remote), SessionTaskStatus::Idle);
+        let local = lease.try_acquire(4).unwrap();
+        assert_eq!(authoritative_task_status(&lease, &remote), SessionTaskStatus::Creator(4));
+        drop(local);
+        assert!(remote.acquire(&lease, 7));
+        let state = authoritative_task_status(&lease, &remote);
+        assert_eq!(state, SessionTaskStatus::Joiner(7));
+        assert!(matches!(SessionTaskStatus::decode(&state.encode()), Ok(value) if value == state));
+        assert!(SessionTaskStatus::decode(b"JOINER:0").is_err());
+        assert!(SessionTaskStatus::decode(b"OTHER:7").is_err());
+        assert!(remote.release(7));
+        assert_eq!(authoritative_task_status(&lease, &remote), SessionTaskStatus::Idle);
+    }
     #[test]
     fn creator_may_receive_its_own_get_reply_without_remote_grant() {
         let lease = crate::lease::TransferLease::new();
