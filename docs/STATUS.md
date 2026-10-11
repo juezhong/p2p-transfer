@@ -260,3 +260,10 @@
 - 交互 shell 新增 `sha256 <本机文件>`、`md5 <本机文件>`，支持绝对路径、相对本机 lcd 的路径、带空格的引号路径和 Tab 补全；计算时使用本机授权文件句柄和 128 KiB 有界缓冲，blocking 线程负责实际文件读取，Control 事件循环不中断。MD5 仅供普通文件比对，不用于安全认证。
 - 应对端 GET 请求发送文件时，发送端只显示原有进度，不再打印 `[GET] 已回传 ... 字节`；接收端仍保留 SHA-256 校验和 GET 完成提示。
 - 本次仅涉及 Transfer CLI/文件摘要，SDK 通用认证链路抽象（移除 Control/Data 业务命名）属于独立架构改造，将在 PR #1 长期跟踪和单独 SDK PR 中实施，不能作为本补丁版完成的功能宣称。
+
+## 2026-10-11：SDK-first 通用 Link 重构与 v0.1.3
+
+- SDK [#73](https://github.com/juezhong/p2p-sdk/pull/73) 已在 7/7 原生跨平台测试成功后合并为 `7b7873c`：SDK API 仅见通用 `bootstrap` 与按需 `manage_link` / `open_link` / `accept_link`，无 Transfer 专属 Control/Data、固定四路策略；保留 HMAC 认证类别隔离及重放校验。
+- Transfer 在 SDK 合并后才开始迁移，固定 `p2p-sdk@7b7873c`：Transfer 将 bootstrap 映射为 Control，把四条 application-requested managed links 解释为 Data（仍在会话连接完成后申请）；旧双连接回归适配 `first/second`。不改变业务请求帧与文件传输语义。
+- `checksum <本机文件>` 单次使用 128 KiB 缓冲流式计算 SHA-256 与 MD5，输出两行系统校验风格摘要；旧 `sha256/md5` 原命令保留。MD5 不得作为抗恶意修改的安全签名。
+- 本批只对 SDK 公共接口/资源生命周期做迁移；**真实 NAT、bootstrap 断线后附加链路恢复、长时会话、2GiB SHA 与跨版本互通仍须用户设备实测**。传输 stream 断开后的业务重传仍由 Transfer 负责。
