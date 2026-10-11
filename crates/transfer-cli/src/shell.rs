@@ -352,14 +352,14 @@ where
             .map_err(|_| "对端或本机已有文件传输任务".to_owned())?)
     } else {
         acquire_transfer_via_sdk(session, batch_id)
-            .await.map_err(|e| format!("远端已占用文件传输租约：{e:?}"))?;
+            .await.map_err(|e| format!("已有设备正在传输文件，不能同时启动新任务：{e:?}"))?;
         None
     };
     let result = operation.await;
     if !is_creator {
         let release = release_transfer_via_sdk(session, batch_id).await;
         if result.is_ok() {
-            release.map_err(|e| format!("远端租约释放失败：{e:?}"))?;
+            release.map_err(|e| format!("无法确认本次文件任务已结束：{e:?}"))?;
         }
     }
     drop(local);
@@ -854,7 +854,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             .ok_or("请输入有效的文件路径")?.to_string_lossy().to_string();
                         let remote = scoped_remote(remote_root.as_deref(), &remote_cwd, args.get(2).map(String::as_str).unwrap_or(&suggested))?;
                         if cancel_in_flight.load(Ordering::SeqCst) {
-                            println!("[传输] 正在确认上一任务的双端取消，请稍后再启动");
+                            println!("[传输] 上一任务正在停止，请稍后再启动");
                             continue;
                         }
                         if active.swap(true, Ordering::SeqCst) {
@@ -894,7 +894,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let source = relative_string(&src)?;
                         let destination = relative_string(&local)?;
                         if cancel_in_flight.load(Ordering::SeqCst) {
-                            println!("[传输] 正在确认上一任务的双端取消，请稍后再启动");
+                            println!("[传输] 上一任务正在停止，请稍后再启动");
                             continue;
                         }
                         if active.swap(true, Ordering::SeqCst) {
