@@ -262,7 +262,7 @@ pub async fn send_via_managed_sdk_cancellable(
     cancels: &TransferCancels,
 ) -> Result<TransferReceipt, SdkTransferError> {
     let (source, remote_destination) = paths;
-    let (_guard, rx) = cancels.register(request_id)
+    let (_guard, rx) = cancels.register_local(request_id)
         .ok_or(SdkTransferError::InvalidDataStream)?;
     let result = tokio::select! {
         biased;
