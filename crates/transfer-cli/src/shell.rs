@@ -67,10 +67,8 @@ pub(crate) fn scoped_path(root: &Path, cwd: &Path, input: &str) -> CliResult<Pat
 }
 
 fn scoped_remote(root: Option<&str>, cwd: &Path, input: &str) -> CliResult<PathBuf> {
-    if Path::new(input).is_absolute() && root.is_none() {
-        return Err("正在取得对端的实际共享目录，请稍后重试".into());
-    }
-    scoped_path(Path::new(root.unwrap_or("")), cwd, input)
+    let root = root.ok_or("尚未取得对端文件系统范围，无法确认文件路径")?;
+    scoped_path(Path::new(root), cwd, input)
 }
 
 fn display_absolute(root: &Path, cwd: &Path) -> String {
@@ -823,5 +821,6 @@ mod tests {
             PathBuf::from("etc/hosts"),
         );
         assert!(scoped_remote(None, Path::new(""), "/outside").is_err());
+        assert!(scoped_remote(None, Path::new(""), "relative").is_err());
     }
 }
