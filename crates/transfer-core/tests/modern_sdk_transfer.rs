@@ -226,7 +226,7 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                         async {
                             let (send, recv) = joiner.control.accept_bi().await.unwrap();
                             serve_control_stream_cancellable(
-                                &joiner, &destination, send, recv, None, Some(&joiner_pool),
+                                &joiner, &destination, (send, recv), None, Some(&joiner_pool),
                                 None, Some(&cancellations),
                             ).await
                         },
