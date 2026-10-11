@@ -140,6 +140,8 @@ pub fn progress(text: Option<String>) {
         return;
     }
     if let Ok(mut screen) = shared().lock() {
+        // A 1 Hz idle tick must not redraw a line the user is editing.
+        if screen.progress == text { return; }
         screen.progress = text;
         redraw(&mut screen);
     }
