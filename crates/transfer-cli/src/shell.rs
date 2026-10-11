@@ -481,7 +481,7 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let session = Arc::clone(&peer.session);
     let lanes = Arc::clone(&peer.data_lanes);
     let result = run_shell(&peer, root).await;
-    session.control.close(0u32.into(), b"user ended transfer shell");
+    session.bootstrap.close(0u32.into(), b"user ended transfer shell");
     lanes.shutdown().await;
     drop(lanes);
     drop(peer);
