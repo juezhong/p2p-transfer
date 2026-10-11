@@ -20,6 +20,7 @@ struct CancelState {
 struct ActiveCancel {
     cancel: watch::Sender<bool>,
     finished: watch::Sender<bool>,
+    local_initiator: bool,
 }
 pub struct CancellationGuard<'a> {
     id: u64,
@@ -60,14 +61,29 @@ impl TransferCancels {
             .unwrap_or_default()
     }
 
+    pub fn local_active_ids(&self) -> Vec<u64> {
+        self.inner.lock().map(|s| s.active.iter()
+            .filter(|(_, active)| active.local_initiator)
+            .map(|(id, _)| *id).collect()).unwrap_or_default()
+    }
+
+    // 主动发送 PUT 的登记必须与对端发起的入站收发登记区分。
+    pub fn register_local(&self, id: u64) -> Option<(CancellationGuard<'_>, watch::Receiver<bool>)> {
+        self.register_owned(id, true)
+    }
+
     pub fn register(&self, id: u64) -> Option<(CancellationGuard<'_>, watch::Receiver<bool>)> {
+        self.register_owned(id, false)
+    }
+
+    fn register_owned(&self, id: u64, local_initiator: bool) -> Option<(CancellationGuard<'_>, watch::Receiver<bool>)> {
         if id == 0 { return None; }
         let mut s = self.inner.lock().ok()?;
         if s.active.contains_key(&id) { return None; }
         let canceled = s.tombstones.contains(&id);
         let (tx, rx) = watch::channel(canceled);
         let (finished, _finished_rx) = watch::channel(false);
-        s.active.insert(id, ActiveCancel { cancel: tx, finished: finished.clone() });
+        s.active.insert(id, ActiveCancel { cancel: tx, finished: finished.clone(), local_initiator });
         Some((CancellationGuard {id, finished, registry: self}, rx))
     }
     pub fn cancel(&self, id: u64) -> bool {
@@ -124,6 +140,15 @@ mod tests {
         assert!(!registry.remote_cancel_allowed());
         running.store(false, Ordering::SeqCst);
         assert!(registry.remote_cancel_allowed());
+    }
+
+    #[test]
+    fn only_local_registered_file_ids_are_eligible_for_local_cancel() {
+        let registry = TransferCancels::default();
+        let (_remote, _) = registry.register(5).unwrap();
+        let (_local, _) = registry.register_local(7).unwrap();
+        assert_eq!(registry.active_ids().len(), 2);
+        assert_eq!(registry.local_active_ids(), vec![7]);
     }
     #[tokio::test]
     async fn cancellation_notifies_active_and_early_registration() {
