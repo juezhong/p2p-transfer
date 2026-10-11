@@ -70,11 +70,13 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::{
     lease::LeaseGuard,
+    progress::TransferProgress,
     protocol::{FrameKind, Frame},
     rpc::{self, RpcRequest},
     secure_io::SharedRoot,
     stream_transfer::{
-        read_frame, receive_file_after_offer, send_file,
+        read_frame, receive_file_after_offer, receive_file_after_offer_with_progress,
+        send_file_with_progress,
         write_frame, TransferError, TransferReceipt,
     },
 };
@@ -222,7 +224,7 @@ pub async fn send_via_sdk(
     remote_destination: &str,
     request_id: u64,
 ) -> Result<TransferReceipt, SdkTransferError> {
-    send_on_managed_lane(session, None, root, source, remote_destination, request_id).await
+    send_on_managed_lane(session, None, root, source, remote_destination, request_id, None).await
 }
 
 /// Choose a fresh authenticated Data lane for each new file operation. The
@@ -236,7 +238,16 @@ pub async fn send_via_managed_sdk(
     remote_destination: &str,
     request_id: u64,
 ) -> Result<TransferReceipt, SdkTransferError> {
-    send_on_managed_lane(session, Some(lanes), root, source, remote_destination, request_id).await
+    send_via_managed_sdk_with_progress(session, lanes, root, source, remote_destination, request_id, None).await
+}
+
+pub async fn send_via_managed_sdk_with_progress(
+    session: &dyn AuthenticatedSession,
+    lanes: &dyn AuthenticatedDataStreams,
+    root: &SharedRoot, source: &Path, remote_destination: &str,
+    request_id: u64, progress: Option<&TransferProgress>,
+) -> Result<TransferReceipt, SdkTransferError> {
+    send_on_managed_lane(session, Some(lanes), root, source, remote_destination, request_id, progress).await
 }
 
 async fn send_on_managed_lane(
@@ -246,6 +257,7 @@ async fn send_on_managed_lane(
     source: &Path,
     remote_destination: &str,
     request_id: u64,
+    progress: Option<&TransferProgress>,
 ) -> Result<TransferReceipt, SdkTransferError> {
     let (control_send, control_recv) = session.control().open_bi().await
         .map_err(|_| SdkTransferError::ControlConnection)?;
@@ -258,8 +270,8 @@ async fn send_on_managed_lane(
     };
     AsyncWriteExt::write_all(&mut data, &data_preface(request_id)).await
         .map_err(SdkTransferError::Io)?;
-    let receipt = send_file(
-        &mut control, &mut data, root, source, remote_destination, request_id,
+    let receipt = send_file_with_progress(
+        &mut control, &mut data, root, source, remote_destination, request_id, progress,
     ).await?;
     data.finish().map_err(|_| SdkTransferError::DataConnection)?;
     Ok(receipt)
@@ -374,6 +386,11 @@ impl Drop for ExpectedLocalGet {
 pub type RemoteLeaseGrant = std::sync::Arc<tokio::sync::Mutex<RemoteLeaseState>>;
 
 impl RemoteLeaseState {
+    /// Current remote-granted batch, if any (for human-readable status).
+    pub fn active_request(&self) -> Option<u64> {
+        self.active.as_ref().map(LeaseGuard::request_id)
+    }
+
     /// Register before sending a GET RPC so its response cannot race us.
     /// The returned RAII guard must live until verification or cancellation.
     pub fn expect_local_get(&self, request_id: u64) -> Option<ExpectedLocalGet> {
@@ -465,6 +482,20 @@ pub async fn serve_control_stream_with_lease(
     lease: Option<(&crate::lease::TransferLease, &RemoteLeaseGrant)>,
     lanes: Option<&dyn AuthenticatedDataStreams>,
 ) -> Result<IncomingResult, SdkTransferError> {
+    serve_control_stream_with_lease_and_progress(
+        session, root, send, recv, lease, lanes, None,
+    ).await
+}
+
+pub async fn serve_control_stream_with_lease_and_progress(
+    session: &dyn AuthenticatedSession,
+    root: &SharedRoot,
+    send: quinn::SendStream,
+    recv: quinn::RecvStream,
+    lease: Option<(&crate::lease::TransferLease, &RemoteLeaseGrant)>,
+    lanes: Option<&dyn AuthenticatedDataStreams>,
+    progress: Option<&TransferProgress>,
+) -> Result<IncomingResult, SdkTransferError> {
     let mut control = ControlIo::new(recv, send);
     let first = read_frame(&mut control).await?;
     match first.kind {
@@ -488,7 +519,9 @@ pub async fn serve_control_stream_with_lease(
             }
             let mut data = read_data_preface(session, lanes, first.request_id).await?;
             Ok(IncomingResult::Received(
-                receive_file_after_offer(first, &mut control, &mut data, root).await?
+                receive_file_after_offer_with_progress(
+                    first, &mut control, &mut data, root, progress,
+                ).await?
             ))
         }
         FrameKind::RpcRequest => {
@@ -552,6 +585,22 @@ pub async fn serve_control_stream_with_lease(
                         }
                     }
                 }
+                Ok(RpcRequest::RootInfo) => {
+                    // This is the root that THIS USER explicitly authorized.
+                    // Never reveal unrelated process paths or follow a remote path.
+                    match root.display_root().to_str() {
+                        Some(path) if path.len() <= 4096 => {
+                            write_frame(&mut control, FrameKind::RpcResponse, request_id,
+                                path.as_bytes().to_vec()).await?;
+                            Ok(IncomingResult::DirectoryListed)
+                        }
+                        _ => {
+                            write_frame(&mut control, FrameKind::Error, request_id,
+                                b"root path unavailable".to_vec()).await?;
+                            Err(SdkTransferError::InvalidDataStream)
+                        }
+                    }
+                }
                 Ok(RpcRequest::MakeDirectory { directory }) => {
                     match rpc::make_directory_in_root(root, &directory) {
                         Ok(()) => {
@@ -584,7 +633,9 @@ pub async fn serve_control_stream_with_lease(
                     }
                     write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
                     Ok(IncomingResult::ServedGet(
-                        send_on_managed_lane(session, lanes, root, Path::new(&source), &destination, request_id).await?
+                        send_on_managed_lane(
+                            session, lanes, root, Path::new(&source), &destination, request_id, progress,
+                        ).await?
                     ))
                 }
                 Err(_) => {
@@ -616,6 +667,19 @@ async fn request_rpc(
 
 /// Remote ls/cd's directory probe: never reveals any path outside the
 /// explicitly authorized root on the remote peer.
+/// Display-only real path of the root explicitly authorized by the peer.
+/// File operations remain confined to relative paths under SharedRoot.
+pub async fn root_info_via_sdk(
+    session: &dyn AuthenticatedSession,
+    request_id: u64,
+) -> Result<String, SdkTransferError> {
+    let response = request_rpc(session, RpcRequest::RootInfo, request_id).await?;
+    if response.payload.len() > 4096 {
+        return Err(SdkTransferError::InvalidDataStream);
+    }
+    String::from_utf8(response.payload).map_err(|_| SdkTransferError::InvalidDataStream)
+}
+
 pub async fn list_via_sdk(
     session: &dyn AuthenticatedSession,
     directory: String,

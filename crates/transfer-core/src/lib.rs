@@ -29,3 +29,6 @@ pub mod data_lane_pool;
 
 /// Transfer-owned Data QUIC lane pool using only the SDK's authenticated links.
 pub mod modern_data_lanes;
+
+/// Verified-disk-write progress snapshots for interactive transfers.
+pub mod progress;

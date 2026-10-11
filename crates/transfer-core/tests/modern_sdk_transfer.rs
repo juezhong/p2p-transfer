@@ -8,7 +8,8 @@ use std::{path::Path, sync::Arc, time::Duration};
 use p2p_sdk::{direct_peer::{begin_creator, begin_joiner}, transport_session::ConnectedTransportPeer};
 use transfer_core::{
     modern_data_lanes::ModernDataLanes,
-    sdk_quic::{list_via_sdk, serve_control_stream, send_via_managed_sdk,
+    progress::TransferProgress,
+    sdk_quic::{list_via_sdk, root_info_via_sdk, serve_control_stream, send_via_managed_sdk_with_progress,
         serve_control_stream_with_lease, ControlIo, IncomingResult},
     secure_io::SharedRoot,
     stream_transfer::{receive_file, send_file, TransferReceipt},
@@ -170,13 +171,29 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                     assert!(names.iter().any(|name| name == "收到 文件.txt"));
                     assert!(names.iter().any(|name| name == "empty.bin"));
 
+                    // A peer sees the actual explicitly authorized directory,
+                    // not an uninformative remote relative "/".
+                    let (actual, response) = tokio::join!(
+                        root_info_via_sdk(&creator, 15),
+                        async {
+                            let (tx, rx) = joiner.control.accept_bi().await.unwrap();
+                            serve_control_stream(&joiner, &destination, tx, rx).await
+                        }
+                    );
+                    assert!(matches!(response.unwrap(), IncomingResult::DirectoryListed));
+                    assert_eq!(
+                        actual.unwrap(),
+                        std::fs::canonicalize(dir.join("B")).unwrap().to_str().unwrap(),
+                    );
+
                     // Test the production Transfer code path with SDK-managed,
                     // independently authenticated Data streams and a real
                     // Control RPC dispatcher (not raw test streams).
+                    let progress = TransferProgress::default();
                     let (sent_again, incoming) = tokio::join!(
-                        send_via_managed_sdk(
+                        send_via_managed_sdk_with_progress(
                             &creator, &creator_pool, &source, Path::new("中文名.txt"),
-                            "第二份.txt", 14,
+                            "第二份.txt", 14, Some(&progress),
                         ),
                         async {
                             let (tx, rx) = joiner.control.accept_bi().await.unwrap();
@@ -190,6 +207,9 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                         _ => panic!("expected a committed file over SDK-managed Data"),
                     };
                     assert_eq!(sent_again.unwrap(), received_again);
+                    let snapshot = progress.snapshot().unwrap();
+                    assert_eq!(snapshot.written, payload.len() as u64);
+                    assert_eq!(snapshot.percent(), 100.0);
                     assert_eq!(
                         std::fs::read(dir.join("B/第二份.txt")).unwrap(),
                         payload.as_bytes(),
