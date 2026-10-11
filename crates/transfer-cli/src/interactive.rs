@@ -97,7 +97,7 @@ fn connected_peer(
     transport: ConnectedTransportPeer, role: &'static str,
 ) -> CliResult<ActivePeer> {
     let diagnostic = transport.diagnostic();
-    if !diagnostic.control_connected {
+    if !diagnostic.bootstrap_connected {
         return Err("SDK 未完成经认证的 Control 连接".into());
     }
     let peer_address = diagnostic.actual_remote_udp;
@@ -108,7 +108,7 @@ fn connected_peer(
     );
     println!("直连 ICE/QUIC 路径：{local_address} → {peer_address}，不使用服务器中继");
     println!("Control QUIC={}；应用认证 Data 链路上限={}",
-        if diagnostic.control_outbound { "outbound" } else { "inbound" },
+        if diagnostic.bootstrap_outbound { "outbound" } else { "inbound" },
         data_lanes.desired());
     Ok(ActivePeer {
         session, data_lanes, role,

@@ -136,17 +136,17 @@ mod tests {
                     control, data, &server_pairing, &server_confirmation,
                     &guard, 103, Duration::from_secs(5),
                 ).await.expect("responder verified manual session");
-                assert_ne!(secure.control().stable_id(), secure.data().stable_id());
+                assert_ne!(secure.first().stable_id(), secure.second().stable_id());
                 let pool = ResilientDataLanes::start_joiner(
                     &secure, server.clone(), &server_pairing, Arc::clone(&guard), 4,
                 ).unwrap();
 
-                let (mut response, mut request) = secure.control().accept_bi().await.unwrap();
+                let (mut response, mut request) = secure.first().accept_bi().await.unwrap();
                 assert_eq!(request.read_to_end(64).await.unwrap(), b"control message");
                 response.write_all(b"control ack").await.unwrap();
                 response.finish().unwrap();
 
-                let (mut response, mut request) = secure.data().accept_bi().await.unwrap();
+                let (mut response, mut request) = secure.second().accept_bi().await.unwrap();
                 assert_eq!(request.read_to_end(64).await.unwrap(), b"data message");
                 response.write_all(b"data ack").await.unwrap();
                 response.finish().unwrap();
@@ -162,11 +162,11 @@ mod tests {
                 assert_eq!(sources.len(), 4);
                 // Initial Data shares Control's validated UDP socket; three
                 // additional lanes use independent bound source ports.
-                assert!(sources.contains(&secure.control().remote_address()));
-                secure.data().closed().await;
+                assert!(sources.contains(&secure.first().remote_address()));
+                secure.second().closed().await;
                 let replacement = pool.wait_for_count(4, Duration::from_secs(8))
                     .await.unwrap().into_iter().next().unwrap();
-                assert_ne!(replacement.stable_id(), secure.data().stable_id());
+                assert_ne!(replacement.stable_id(), secure.second().stable_id());
                 let (mut response, mut request) = replacement.accept_bi().await.unwrap();
                 assert_eq!(request.read_to_end(64).await.unwrap(), b"repaired data");
                 response.write_all(b"repaired ack").await.unwrap();
@@ -175,13 +175,13 @@ mod tests {
                     .await.expect("receive from authenticated repaired pool");
                 assert_eq!(next_stream.read_to_end(64).await.unwrap(), b"pool data");
 
-                let (mut response, mut request) = secure.control().accept_bi().await.unwrap();
+                let (mut response, mut request) = secure.first().accept_bi().await.unwrap();
                 assert_eq!(request.read_to_end(64).await.unwrap(), b"control after data close");
                 response.write_all(b"still alive").await.unwrap();
                 response.finish().unwrap();
 
                 done_rx.await.unwrap();
-                assert!(secure.control().close_reason().is_none());
+                assert!(secure.first().close_reason().is_none());
                 server.close(0u32.into(), b"completed");
             });
 
@@ -193,7 +193,7 @@ mod tests {
                 control, data, &client_pairing, &client_confirmation,
                 103, Duration::from_secs(5),
             ).await.expect("initiator verified manual session");
-            assert_ne!(secure.control().stable_id(), secure.data().stable_id());
+            assert_ne!(secure.first().stable_id(), secure.second().stable_id());
             let pool = ResilientDataLanes::start_creator_with_independent_udp(
                 &secure, client.clone(), server_ip_port, &client_pairing,
                 client_cfg, 4,
@@ -206,31 +206,31 @@ mod tests {
                 send.finish().unwrap();
                 assert_eq!(receive.read_to_end(64).await.unwrap(), expected);
             }
-            rpc(secure.control(), b"control message", b"control ack").await;
-            rpc(secure.data(), b"data message", b"data ack").await;
+            rpc(secure.first(), b"control message", b"control ack").await;
+            rpc(secure.second(), b"data message", b"data ack").await;
             let mut monitor = secure.watch_link_termination();
             secure.close_data();
             assert_eq!(
                 tokio::time::timeout(Duration::from_secs(3), monitor.recv()).await.unwrap(),
                 Some(p2p_sdk::verified_session::SessionLinkEvent::DataDisconnected),
             );
-            secure.data().closed().await;
+            secure.second().closed().await;
             // Pool must replace the exact dead lane, not merely count stale
             // connections, without disturbing control or other Data lanes.
             let recovered = pool.wait_for_count(4, Duration::from_secs(8))
                 .await.unwrap();
-            assert!(!recovered.iter().any(|c| c.stable_id() == secure.data().stable_id()));
+            assert!(!recovered.iter().any(|c| c.stable_id() == secure.second().stable_id()));
             rpc(&recovered[0], b"repaired data", b"repaired ack").await;
             let mut outgoing = pool.open_uni(Duration::from_secs(8))
                 .await.expect("open stream from authenticated 4-lane pool");
             outgoing.write_all(b"pool data").await.unwrap();
             outgoing.finish().unwrap();
             assert!(monitor.try_recv().is_err());
-            rpc(secure.control(), b"control after data close", b"still alive").await;
-            assert!(secure.control().close_reason().is_none());
+            rpc(secure.first(), b"control after data close", b"still alive").await;
+            assert!(secure.first().close_reason().is_none());
             done_tx.send(()).unwrap();
             server_task.await.unwrap();
-            secure.control().closed().await;
+            secure.first().closed().await;
             // The pool must fail closed immediately once Control is gone:
             // even previously healthy Data connections are not permission
             // to keep transferring outside the verified session.

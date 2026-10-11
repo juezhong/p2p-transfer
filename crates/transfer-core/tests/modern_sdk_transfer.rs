@@ -31,7 +31,7 @@ async fn send_one(
     let (source_root, destination_root) = roots;
     tokio::join!(
         async {
-            let (tx, rx) = sender.control.open_bi().await.unwrap();
+            let (tx, rx) = sender.bootstrap.open_bi().await.unwrap();
             let mut control = ControlIo::new(rx, tx);
             let mut data = send_lane.open_uni().await.unwrap();
             // QUIC open_uni() alone does not send a STREAM frame.
@@ -49,7 +49,7 @@ async fn send_one(
             result
         },
         async {
-            let (tx, rx) = receiver.control.accept_bi().await.unwrap();
+            let (tx, rx) = receiver.bootstrap.accept_bi().await.unwrap();
             let mut control = ControlIo::new(rx, tx);
             let mut data = recv_lane.accept_uni().await.unwrap();
             let mut preface = [0u8; 12];
@@ -111,8 +111,8 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                     let joiner = Arc::new(joiner.unwrap());
                     let creator_diagnostic = creator.diagnostic();
                     let joiner_diagnostic = joiner.diagnostic();
-                    assert!(creator_diagnostic.control_connected);
-                    assert!(joiner_diagnostic.control_connected);
+                    assert!(creator_diagnostic.bootstrap_connected);
+                    assert!(joiner_diagnostic.bootstrap_connected);
                     assert_eq!(
                         creator_diagnostic.actual_local_udp,
                         joiner_diagnostic.actual_remote_udp,
@@ -122,8 +122,8 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                         creator_diagnostic.actual_remote_udp,
                     );
                     assert_eq!(
-                        creator_diagnostic.control_outbound,
-                        !joiner_diagnostic.control_outbound,
+                        creator_diagnostic.bootstrap_outbound,
+                        !joiner_diagnostic.bootstrap_outbound,
                     );
 
                     // Application, not SDK, owns the number of Data lanes.
@@ -167,7 +167,7 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                     let (listing, response) = tokio::join!(
                         list_via_sdk(&creator, String::new(), 13),
                         async {
-                            let (tx, rx) = joiner.control.accept_bi().await.unwrap();
+                            let (tx, rx) = joiner.bootstrap.accept_bi().await.unwrap();
                             serve_control_stream(&joiner, &destination, tx, rx).await
                         }
                     );
@@ -181,7 +181,7 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                     let (actual, response) = tokio::join!(
                         root_info_via_sdk(&creator, 15),
                         async {
-                            let (tx, rx) = joiner.control.accept_bi().await.unwrap();
+                            let (tx, rx) = joiner.bootstrap.accept_bi().await.unwrap();
                             serve_control_stream(&joiner, &destination, tx, rx).await
                         }
                     );
@@ -198,7 +198,7 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                     let (initial, answered) = tokio::join!(
                         starting_directory_via_sdk(&creator, 16),
                         async {
-                            let (send, recv) = joiner.control.accept_bi().await.unwrap();
+                            let (send, recv) = joiner.bootstrap.accept_bi().await.unwrap();
                             serve_control_stream(&joiner, &interactive_root, send, recv).await
                         }
                     );
@@ -218,7 +218,7 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                             "第二份.txt", 14, Some(&progress),
                         ),
                         async {
-                            let (tx, rx) = joiner.control.accept_bi().await.unwrap();
+                            let (tx, rx) = joiner.bootstrap.accept_bi().await.unwrap();
                             serve_control_stream_with_lease(
                                 &joiner, &destination, tx, rx, None, Some(&joiner_pool),
                             ).await
@@ -244,7 +244,7 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                     let (ack, served) = tokio::join!(
                         cancel_transfer_via_sdk(&creator, 23),
                         async {
-                            let (send, recv) = joiner.control.accept_bi().await.unwrap();
+                            let (send, recv) = joiner.bootstrap.accept_bi().await.unwrap();
                             serve_control_stream_cancellable(
                                 &joiner, &destination, (send, recv), None, Some(&joiner_pool),
                                 None, Some(&cancellations),
@@ -275,7 +275,7 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                                 },
                                 async {
                                     let (send, recv) =
-                                        joiner.control.accept_bi().await.unwrap();
+                                        joiner.bootstrap.accept_bi().await.unwrap();
                                     tokio::join!(
                                         serve_control_stream_cancellable(
                                             &joiner, &destination, (send, recv), None,
@@ -283,7 +283,7 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                                         ),
                                         async {
                                             let (send, recv) =
-                                                joiner.control.accept_bi().await.unwrap();
+                                                joiner.bootstrap.accept_bi().await.unwrap();
                                             serve_control_stream_cancellable(
                                                 &joiner, &destination, (send, recv), None,
                                                 Some(&joiner_pool), None, Some(&in_flight_cancels),
@@ -318,7 +318,7 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                                 // ACKing the offer, guaranteeing the sender is
                                 // IN FLIGHT (waiting on the first disk ACK).
                                 let (_file_send, _file_recv) =
-                                    joiner.control.accept_bi().await.unwrap();
+                                    joiner.bootstrap.accept_bi().await.unwrap();
                                 milestones.fetch_or(2, std::sync::atomic::Ordering::SeqCst);
                                 loop {
                                     if put_sender_registry.active_ids().contains(&37) {
@@ -339,7 +339,7 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                                 // that should handle the new CANCEL RPC.
                                 loop {
                                     let (send, recv) =
-                                        creator.control.accept_bi().await.unwrap();
+                                        creator.bootstrap.accept_bi().await.unwrap();
                                     milestones.fetch_or(16, std::sync::atomic::Ordering::SeqCst);
                                     let handled = serve_control_stream_cancellable(
                                         &creator, &source, (send, recv), None,

@@ -260,3 +260,9 @@
 - 交互 shell 新增 `sha256 <本机文件>`、`md5 <本机文件>`，支持绝对路径、相对本机 lcd 的路径、带空格的引号路径和 Tab 补全；计算时使用本机授权文件句柄和 128 KiB 有界缓冲，blocking 线程负责实际文件读取，Control 事件循环不中断。MD5 仅供普通文件比对，不用于安全认证。
 - 应对端 GET 请求发送文件时，发送端只显示原有进度，不再打印 `[GET] 已回传 ... 字节`；接收端仍保留 SHA-256 校验和 GET 完成提示。
 - 本次仅涉及 Transfer CLI/文件摘要，SDK 通用认证链路抽象（移除 Control/Data 业务命名）属于独立架构改造，将在 PR #1 长期跟踪和单独 SDK PR 中实施，不能作为本补丁版完成的功能宣称。
+
+## SDK 通用 Link 消费端适配（独立于 v0.1.2）
+
+- Transfer 调用 SDK 通用 `manage_link()`，在 Transfer 的 `ModernDataLanes` 中决定四条附加连接及文件流分配，SDK 不再定义 Control/Data 业务类型。
+- Transfer 的业务 `AuthenticatedSession::control()` 仅映射到 SDK 的 `bootstrap` 实际连接，`sdk_quic` 原业务 RPC 帧语义不变；原远端取消、SHA、MD5 等逻辑保持不变。
+- 此功能必须在 SDK #73 全绿及实际 x86_64 ↔ RK3568 ICE/QUIC 测试后另行合并发布，不包含在 v0.1.2 补丁中；绝不覆盖已发行稳定版。
