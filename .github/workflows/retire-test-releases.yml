@@ -1,0 +1,75 @@
+name: Retire old test releases (manual, archived)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type DELETE_TEST_1_TO_8 to archive and delete eight test releases and tags'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  backup:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify confirmation and stable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFIRM: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          test "$CONFIRM" = "DELETE_TEST_1_TO_8"
+          test "$(gh release view v0.1.0 --json isPrerelease --jq .isPrerelease)" = "false"
+          mkdir -p preview-backup
+          git ls-remote origin 'refs/tags/v0.1.0-test.*' > preview-backup/original-tag-shas.txt
+      - name: Backup all original release assets and descriptions
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for i in {1..8}; do
+            tag="v0.1.0-test.$i"
+            mkdir -p "preview-backup/$tag"
+            gh release view "$tag" --json tagName,isPrerelease,assets,body > "preview-backup/$tag/release.json"
+            test "$(gh release view "$tag" --json isPrerelease --jq .isPrerelease)" = "true"
+            gh release download "$tag" -D "preview-backup/$tag"
+            test "$(find "preview-backup/$tag" -maxdepth 1 -type f | wc -l)" -ge 2
+          done
+      - name: Retain recovery archive before removing releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-eight-test-release-backup
+          path: preview-backup/
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error
+
+  delete:
+    needs: backup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Delete precisely eight test releases and tags
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFIRM: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          test "$CONFIRM" = "DELETE_TEST_1_TO_8"
+          gh release view v0.1.0 >/dev/null
+          for i in {1..8}; do
+            tag="v0.1.0-test.$i"
+            gh release delete "$tag" --yes --cleanup-tag
+          done
+          gh release view v0.1.0 >/dev/null
+          echo "Stable v0.1.0 retained; eight test releases and their tags deleted."
