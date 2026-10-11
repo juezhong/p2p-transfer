@@ -379,4 +379,34 @@ mod tests {
         drop(root);
         std::fs::remove_dir_all(location).unwrap();
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn interactive_shell_starts_in_cwd_but_accesses_sibling_absolute_paths() {
+        let (base, restricted) = fixture();
+        let a = base.join("A");
+        let b = base.join("B");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let outside_start = b.join("来自其他目录.txt");
+        std::fs::write(&outside_start, b"allowed by OS permission").unwrap();
+
+        let shell = SharedRoot::for_interactive_shell(&a).unwrap();
+        assert_eq!(shell.display_root(), Path::new("/"));
+        assert_eq!(shell.starting_directory(), std::fs::canonicalize(&a).unwrap());
+        assert_eq!(shell.starting_relative().unwrap(),
+            std::fs::canonicalize(&a).unwrap().strip_prefix("/").unwrap());
+        let absolute_relative = std::fs::canonicalize(&outside_start).unwrap();
+        let relative = absolute_relative.strip_prefix("/").unwrap();
+        let mut opened = shell.open_read(relative).unwrap();
+        let mut data = Vec::new();
+        opened.read_to_end(&mut data).unwrap();
+        assert_eq!(&data, b"allowed by OS permission");
+        // Restricted library sessions continue to disallow escaping their
+        // explicitly configured root, even after broad CLI support exists.
+        assert!(restricted.open_read(Path::new("../B/来自其他目录.txt")).is_err());
+        drop(shell);
+        drop(restricted);
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }
