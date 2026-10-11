@@ -275,3 +275,11 @@
 - 针对用户日志中发送端 `RemoteRejected`、接收端 `Filesystem(Io)`：当前仅可确认接收侧文件操作失败，发送端收到拒绝。不能无证据归咎于校验计算；通过禁止重叠文件 I/O 避免一种可控的资源争用，同时明确提示本次传输未通过写盘/SHA 确认。
 - 文本终端进度改为稳定单行 10 格进度条、百分比、已传/总量、速率、预计剩余时间、文件路径；保持原单个 TTY 输出锁与原始终端恢复行为，避免更换 TUI 框架带来的稳定性风险。
 - 仍需要实体 Linux x86_64 ↔ RK3568 对 2 GiB GET、传输中请求校验、接收端空间不足和恢复后的状态进行验证；不能把减轻 I/O 竞争等同于诊断解决所有 `Filesystem(Io)`。
+
+## 2026-10-12：v0.1.4 CLI 维护版正式发布
+
+- 以已通过 13/13 项跨平台 PR 检查、且合并后 14/14 项工作流检查通过的 PR #46 代码为基线，补丁版本仅更新 `transfer-cli` 的 Cargo 版本、Cargo.lock 和发布说明。
+- `checksum`、`sha256`、`md5` 在会话进行传输时先等待，两端任务空闲后再计算；计算完成前暂停新的输入命令但 Control/Data 异步调度保持运行。进度栏与终端刷新及失败提示已优化。
+- 保留 `v0.1.3` Release 和 Transfer `transfer-v0.1.3-accepted-baseline`、SDK `transfer-v0.1.3-sdk-baseline` 的历史源码标签。SDK Git rev 与 transfer-core 不改动。
+- `Filesystem(Io)` 的接收侧真实 errno 未在旧日志暴露，因此尚无法确认磁盘错误根因。必须继续执行 Linux x86_64 ↔ RK3568 的真实 2GiB GET、checksum 排队、双端 SHA 一致性及故障注入测试。
+
