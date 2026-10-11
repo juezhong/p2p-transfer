@@ -1,10 +1,10 @@
-# Rust Transfer 双机联机测试：无参数 Go 风格 CLI（v0.1.0-test.5 预览）
+# Rust Transfer 双机联机测试：无参数 Go 风格 CLI（v0.1.0-test.6 预览）
 
 > **目前尚未达到 Go v0.16.4 完整功能对等，不是稳定 Release。** 目录浏览、PUT/GET、递归目录、手动配对/ICE、双向 mTLS、控制/数据独立 QUIC 已通过五平台本机双进程自动测试；真正不同路由器的公网 NAT 穿透还没有用户现场结果。
 
 ## 获取五平台构建
 
-优先从 [GitHub Release v0.1.0-test.5](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.0-test.5) 的 **Assets** 下载所属架构的正式预览二进制和 `SHA256SUMS.txt`。如果本次七目标发布工作流尚未结束，请不要下载旧的 v0.1.0-test.3 进行新版 SDK 测试；可在 [Release Actions](https://github.com/juezhong/p2p-transfer/actions/workflows/preview-release.yml) 中检查进度。
+优先从 [GitHub Release v0.1.0-test.6](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.0-test.6) 的 **Assets** 下载所属架构的正式预览二进制和 `SHA256SUMS.txt`。如果本次七目标发布工作流尚未结束，请不要下载旧的 v0.1.0-test.3 进行新版 SDK 测试；可在 [Release Actions](https://github.com/juezhong/p2p-transfer/actions/workflows/preview-release.yml) 中检查进度。
 
 - Windows x86_64：`p2p-transfer-windows-x86_64.exe`
 - macOS Intel x86_64：`p2p-transfer-macos-x86_64`
@@ -85,3 +85,11 @@ quit
 - `status`：显示 ICE/Control 的双方 UDP IP/端口、拨号方向、候选类型、STUN/网关信息、每条 Data QUIC 的连接标识、本地 IP 与远端 UDP 地址，以及双方**本次明确授权的真实共享根目录**和会话租约拥有方。SDK 尚未公开 Data owner 的本地端口，本版无法完整显示每一条 Data 的本地 UDP 源端口。
 - `put/get`：命令行暂停下一提示符直至任务结束/取消；每秒主动打印基于接收端实际写盘 ACK 的百分比、MiB、速率、已用时间与 ETA；其他 RPC 不被暂停。Ctrl-C 可取消当前本地任务；远端可靠 CANCEL 与断点续传仍未完成。
 - 一方 `quit` 时，另一方提示对端已断开，保留本地 shell 只接受 `quit` 退出；不会因正常 QUIC 关闭打印误导性网络错误。请用两台设备反复验证退出过程没有残留 `.part`、Data socket 或占用端口。
+
+## test.6 现场重点
+
+- 启动欢迎屏打印版本号；终端使用一行持续刷新的进度条，stdout 重定向日志时仍按行输出。
+- 在 RK3568 运行 `get 2GB.bin`，传输达到 5–10% 后按 Ctrl-C。应收到远端取消确认；x86_64 发送方应**立即终止这次文件发送**，没有继续上升的进度；Control 和 4 条 Data 保持认证连接，稍后可重新发起新的 GET。
+- 两台设备都输入 `status`，检查 Transfer 租约最终空闲、暂存文件删除；然后断开并退出。这里验证远端取消不需要把整个 P2P 会话关闭。
+- 默认只授权当前共享目录。**Linux/Unix 如需允许绝对路径访问整机**，可分别在启动前明确执行 `P2P_TRANSFER_SHARE_ROOT=/ ./p2p-transfer-linux-x86_64` 等命令，并在授权提示中输入 yes；等同于授予配对对端对该用户账户可访问的整个文件系统的读写权限，风险很高，仅在可信设备间使用。普通绝对路径位于已授权目录内部时无需此环境变量。
+- 命令提示符只显示远端授权路径（例如 `/root/p2p-transfer>`），不再附加 `p2p[remote:...]` 前缀；`pwd` 和 `lpwd` 展示完整路径。

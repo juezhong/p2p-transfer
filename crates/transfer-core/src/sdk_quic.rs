@@ -69,6 +69,7 @@ use crate::{data_lane_pool::ResilientDataLanes, modern_data_lanes::ModernDataLan
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::{
+    cancel::{TransferCancels, canceled},
     lease::LeaseGuard,
     progress::TransferProgress,
     protocol::{FrameKind, Frame},
@@ -102,6 +103,7 @@ pub enum SdkTransferError {
     InvalidDataStream,
     Io(io::Error),
     Transfer(TransferError),
+    Cancelled,
 }
 
 impl From<TransferError> for SdkTransferError {
@@ -248,6 +250,24 @@ pub async fn send_via_managed_sdk_with_progress(
     request_id: u64, progress: Option<&TransferProgress>,
 ) -> Result<TransferReceipt, SdkTransferError> {
     send_on_managed_lane(session, Some(lanes), root, source, remote_destination, request_id, progress).await
+}
+
+/// A local PUT is registered so a remote CANCEL promptly stops sending
+/// even if the network Control and all Data links remain healthy.
+pub async fn send_via_managed_sdk_cancellable(
+    session: &dyn AuthenticatedSession,
+    lanes: &dyn AuthenticatedDataStreams,
+    root: &SharedRoot, source: &Path, remote_destination: &str,
+    request_id: u64, progress: Option<&TransferProgress>,
+    cancels: &TransferCancels,
+) -> Result<TransferReceipt, SdkTransferError> {
+    let (_guard, rx) = cancels.register(request_id)
+        .ok_or(SdkTransferError::InvalidDataStream)?;
+    tokio::select! {
+        biased;
+        () = canceled(rx) => Err(SdkTransferError::Cancelled),
+        result = send_on_managed_lane(session, Some(lanes), root, source, remote_destination, request_id, progress) => result,
+    }
 }
 
 async fn send_on_managed_lane(
@@ -496,6 +516,20 @@ pub async fn serve_control_stream_with_lease_and_progress(
     lanes: Option<&dyn AuthenticatedDataStreams>,
     progress: Option<&TransferProgress>,
 ) -> Result<IncomingResult, SdkTransferError> {
+    serve_control_stream_cancellable(session, root, send, recv, lease, lanes, progress, None).await
+}
+
+/// Dispatch with a session-scoped cross-QUIC cancel registry.
+pub async fn serve_control_stream_cancellable(
+    session: &dyn AuthenticatedSession,
+    root: &SharedRoot,
+    send: quinn::SendStream,
+    recv: quinn::RecvStream,
+    lease: Option<(&crate::lease::TransferLease, &RemoteLeaseGrant)>,
+    lanes: Option<&dyn AuthenticatedDataStreams>,
+    progress: Option<&TransferProgress>,
+    cancels: Option<&TransferCancels>,
+) -> Result<IncomingResult, SdkTransferError> {
     let mut control = ControlIo::new(recv, send);
     let first = read_frame(&mut control).await?;
     match first.kind {
@@ -517,12 +551,26 @@ pub async fn serve_control_stream_with_lease_and_progress(
                     return Err(SdkTransferError::InvalidDataStream);
                 }
             }
-            let mut data = read_data_preface(session, lanes, first.request_id).await?;
-            Ok(IncomingResult::Received(
-                receive_file_after_offer_with_progress(
-                    first, &mut control, &mut data, root, progress,
-                ).await?
-            ))
+            let id = first.request_id;
+            if let Some(registry) = cancels {
+                let (_guard, rx) = registry.register(id)
+                    .ok_or(SdkTransferError::InvalidDataStream)?;
+                tokio::select! {
+                    biased;
+                    () = canceled(rx) => Err(SdkTransferError::Cancelled),
+                    received = async {
+                        let mut data = read_data_preface(session, lanes, id).await?;
+                        receive_file_after_offer_with_progress(
+                            first, &mut control, &mut data, root, progress,
+                        ).await.map_err(SdkTransferError::from)
+                    } => Ok(IncomingResult::Received(received?)),
+                }
+            } else {
+                let mut data = read_data_preface(session, lanes, id).await?;
+                Ok(IncomingResult::Received(
+                    receive_file_after_offer_with_progress(first, &mut control, &mut data, root, progress).await?
+                ))
+            }
         }
         FrameKind::RpcRequest => {
             let request_id = first.request_id;
@@ -585,6 +633,18 @@ pub async fn serve_control_stream_with_lease_and_progress(
                         }
                     }
                 }
+                Ok(RpcRequest::CancelTransfer) => {
+                    // Only authenticated session peers can issue this RPC.
+                    // Unknown IDs install a bounded tombstone: cancel-before-
+                    // offer cannot resurrect the transfer.
+                    let accepted = cancels.is_some_and(|r| r.cancel(request_id));
+                    if accepted {
+                        write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
+                    } else {
+                        write_frame(&mut control, FrameKind::Error, request_id, b"cancel unsupported".to_vec()).await?;
+                    }
+                    Ok(IncomingResult::DirectoryListed)
+                }
                 Ok(RpcRequest::RootInfo) => {
                     // This is the root that THIS USER explicitly authorized.
                     // Never reveal unrelated process paths or follow a remote path.
@@ -631,12 +691,27 @@ pub async fn serve_control_stream_with_lease_and_progress(
                         write_frame(&mut control, FrameKind::Error, request_id, b"file denied".to_vec()).await?;
                         return Err(SdkTransferError::InvalidDataStream);
                     }
-                    write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
-                    Ok(IncomingResult::ServedGet(
-                        send_on_managed_lane(
-                            session, lanes, root, Path::new(&source), &destination, request_id, progress,
-                        ).await?
-                    ))
+                    // Register before acknowledging GET: Cancel may arrive
+                    // on another Control stream before data actually begins.
+                    if let Some(registry) = cancels {
+                        let (_guard, rx) = registry.register(request_id)
+                            .ok_or(SdkTransferError::InvalidDataStream)?;
+                        write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
+                        tokio::select! {
+                            biased;
+                            () = canceled(rx) => Err(SdkTransferError::Cancelled),
+                            sent = send_on_managed_lane(
+                                session, lanes, root, Path::new(&source), &destination, request_id, progress,
+                            ) => Ok(IncomingResult::ServedGet(sent?)),
+                        }
+                    } else {
+                        write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
+                        Ok(IncomingResult::ServedGet(
+                            send_on_managed_lane(
+                                session, lanes, root, Path::new(&source), &destination, request_id, progress,
+                            ).await?
+                        ))
+                    }
                 }
                 Err(_) => {
                     write_frame(&mut control, FrameKind::Error, request_id, b"invalid RPC".to_vec()).await?;
@@ -735,6 +810,18 @@ pub async fn acquire_transfer_via_sdk(
     if id == 0 { return Err(SdkTransferError::InvalidDataStream); }
     let result = request_rpc(session, RpcRequest::AcquireTransfer, id).await?;
     if result.payload != b"OK" { return Err(SdkTransferError::InvalidDataStream); }
+    Ok(())
+}
+
+/// Send authenticated request-ID cancellation before dropping the file
+/// receive future. Remote sender will halt and release file/data resources.
+pub async fn cancel_transfer_via_sdk(
+    session: &dyn AuthenticatedSession,
+    request_id: u64,
+) -> Result<(), SdkTransferError> {
+    if request_id == 0 { return Err(SdkTransferError::InvalidDataStream); }
+    let response = request_rpc(session, RpcRequest::CancelTransfer, request_id).await?;
+    if response.payload != b"OK" { return Err(SdkTransferError::InvalidDataStream); }
     Ok(())
 }
 

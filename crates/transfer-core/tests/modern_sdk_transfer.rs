@@ -8,8 +8,10 @@ use std::{path::Path, sync::Arc, time::Duration};
 use p2p_sdk::{direct_peer::{begin_creator, begin_joiner}, transport_session::ConnectedTransportPeer};
 use transfer_core::{
     modern_data_lanes::ModernDataLanes,
+    cancel::{TransferCancels, canceled},
     progress::TransferProgress,
-    sdk_quic::{list_via_sdk, root_info_via_sdk, serve_control_stream, send_via_managed_sdk_with_progress,
+    sdk_quic::{list_via_sdk, root_info_via_sdk, cancel_transfer_via_sdk,
+        serve_control_stream, serve_control_stream_cancellable, send_via_managed_sdk_with_progress,
         serve_control_stream_with_lease, ControlIo, IncomingResult},
     secure_io::SharedRoot,
     stream_transfer::{receive_file, send_file, TransferReceipt},
@@ -215,6 +217,24 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                         payload.as_bytes(),
                     );
 
+                    // Independent cancellation RPC on authenticated Control
+                    // retains the target ID even when it arrives before the
+                    // corresponding GET/PUT send starts.
+                    let cancellations = TransferCancels::default();
+                    let (ack, served) = tokio::join!(
+                        cancel_transfer_via_sdk(&creator, 23),
+                        async {
+                            let (send, recv) = joiner.control.accept_bi().await.unwrap();
+                            serve_control_stream_cancellable(
+                                &joiner, &destination, send, recv, None, Some(&joiner_pool),
+                                None, Some(&cancellations),
+                            ).await
+                        },
+                    );
+                    ack.unwrap();
+                    assert!(matches!(served.unwrap(), IncomingResult::DirectoryListed));
+                    let (_guard, rx) = cancellations.register(23).unwrap();
+                    tokio::time::timeout(Duration::from_secs(1), canceled(rx)).await.unwrap();
                     creator_pool.shutdown().await;
                     joiner_pool.shutdown().await;
                     drop(creator_pool);

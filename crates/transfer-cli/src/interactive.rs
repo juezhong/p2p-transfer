@@ -51,7 +51,7 @@ async fn default_stun() -> Vec<SocketAddr> {
 }
 
 pub async fn run() -> CliResult<()> {
-    println!("\nP2P Transfer（Rust）— 交互模式");
+    println!("\nP2P Transfer v{}（Rust）— 交互模式", env!("CARGO_PKG_VERSION"));
     println!("1) 创建连接（生成 INVITE 邀请码）");
     println!("2) 加入连接（输入 INVITE 邀请码）");
     println!("3) 退出");
@@ -63,12 +63,22 @@ pub async fn run() -> CliResult<()> {
             _ => println!("请输入 1、2 或 3"),
         }
     };
-    let dir = std::env::current_dir().map_err(debug_error)?;
+    // An explicit opt-in can authorize a larger filesystem tree. On Unix,
+    // P2P_TRANSFER_SHARE_ROOT=/ permits absolute paths across the host; do
+    // not grant that automatically as a side effect of code exchange.
+    let dir = match std::env::var_os("P2P_TRANSFER_SHARE_ROOT") {
+        Some(path) => std::fs::canonicalize(path).map_err(debug_error)?,
+        None => std::env::current_dir().map_err(debug_error)?,
+    };
     println!("\n本次连接将共享的本机目录：");
     println!("  {}", dir.display());
     println!("对端连接成功后，可以列出并下载该目录内的文件及子目录，");
     println!("也可以向该目录内上传文件或创建子目录（不会覆盖已有文件）。");
     println!("对端不能读取或写入此目录以外的路径；本次授权仅在当前会话有效。");
+    if dir.parent().is_none() {
+        println!("[高风险] 当前选择的是文件系统根目录，配对设备可访问本机权限允许的所有文件！");
+    }
+    println!("如需使用其他绝对路径，可在启动前设置 P2P_TRANSFER_SHARE_ROOT 为要授权的目录。");
     let answer = prompt(&format!(
         "确认允许对端访问【{}】及其子目录？输入 yes 授权，其余输入取消：",
         dir.display()

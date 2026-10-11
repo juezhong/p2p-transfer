@@ -15,6 +15,7 @@ const MKDIR_OP: u8 = 4;
 const ACQUIRE_TRANSFER_OP: u8 = 5;
 const RELEASE_TRANSFER_OP: u8 = 6;
 const ROOT_INFO_OP: u8 = 7;
+const CANCEL_TRANSFER_OP: u8 = 8;
 const MAX_ENTRIES: usize = 8192;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +29,8 @@ pub enum RpcRequest {
     ReleaseTransfer,
     /// Returns only the explicitly authorized root, not arbitrary host paths.
     RootInfo,
+    /// Authenticated cancel request; request_id identifies the target file.
+    CancelTransfer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,6 +82,7 @@ impl RpcRequest {
             Self::AcquireTransfer => bytes.push(ACQUIRE_TRANSFER_OP),
             Self::ReleaseTransfer => bytes.push(RELEASE_TRANSFER_OP),
             Self::RootInfo => bytes.push(ROOT_INFO_OP),
+            Self::CancelTransfer => bytes.push(CANCEL_TRANSFER_OP),
             Self::Get { source, destination } => {
                 bytes.push(GET_OP);
                 push_string(&mut bytes, source)?;
@@ -104,6 +108,7 @@ impl RpcRequest {
             ACQUIRE_TRANSFER_OP => Self::AcquireTransfer,
             RELEASE_TRANSFER_OP => Self::ReleaseTransfer,
             ROOT_INFO_OP => Self::RootInfo,
+            CANCEL_TRANSFER_OP => Self::CancelTransfer,
             GET_OP => Self::Get {
                 source: read_string(bytes, &mut pos)?.to_owned(),
                 destination: read_string(bytes, &mut pos)?.to_owned(),
@@ -224,6 +229,7 @@ mod tests {
             RpcRequest::MakeDirectory { directory: "new/子目录".into() },
             RpcRequest::AcquireTransfer,
             RpcRequest::RootInfo,
+            RpcRequest::CancelTransfer,
             RpcRequest::ReleaseTransfer,
         ] {
             assert_eq!(RpcRequest::decode(&r.encode().unwrap()), Ok(r));

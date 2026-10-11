@@ -32,3 +32,6 @@ pub mod modern_data_lanes;
 
 /// Verified-disk-write progress snapshots for interactive transfers.
 pub mod progress;
+
+/// Bounded cancel-by-request-ID registry for authenticated Control RPC.
+pub mod cancel;

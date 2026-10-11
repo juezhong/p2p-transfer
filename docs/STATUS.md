@@ -217,3 +217,11 @@
 - 用户真实 LAN 中双方 IPv4 ICE nominated、Control QUIC 方向一致、4/4 认证 Data QUIC 成功；`ls` 确认远程文件系统可访问。但 2 GiB 任务没有完成且双方先后执行不同方向 put/get 导致租约 busy，随后 `quit` 关闭导致对端 auxiliary connection closed；**没有证据表明是独立的 NAT 失败**。
 - PR #34 改为 Go v0.16.4 的前台 PUT/GET、每秒真实写盘 ACK 进度、详细 status 和授权的远端真实目录 RPC、对端掉线提示/统一清理、GET 取消防遗留待决应答，以及省略六位核对交互（完全保留 SDK TLS PIN/HMAC/ICE，但首次身份抗中间人能力取决于可信的 INVITE/REPLY 交换）。
 - **尚未实现/验证：** Data 独立本机 UDP owner 源端口的诊断 API、真正 2 GiB 完整成功率/吞吐、断线中途未确认 chunk 的恢复、可靠远端 CANCEL、多路 striping 以及真实 CGNAT/IPv6 stateful firewall。必须待 CI 成功后发布 test.5 供实体设备复测。
+
+## 2026-10-11：真实双机 2 GiB 部分传输及跨端取消/CLI UI 对齐 Go
+
+- 真实 LAN 用户日志证实 x86_64 ↔ RK3568 4/4 Data QUIC 稳定推进约 1.4GiB/2048MiB、约 25MiB/s；**传输未完成**，不声称 2 GiB 性能达标。RK3568 Ctrl-C 之后发送方继续推送至对端退出，原因是当前 Rust Ctrl-C **仅 abort 本地 GET Future**，没有发给发送端 Cancel。
+- 修复：新增经认证 Control RPC `CancelTransfer` 按文件请求 ID 取消远端活动的 GET 回复发送、PUT 发起发送、接收 Data 与临时 PartWriter；带最多128个 tombstones 防止远端取消早于请求出现时错误复活。CTRL-C 和 cancel 同时处理本地/远端任务，批次租约仍需清理，双方不必断 Control。
+- CLI 启动打印 `CARGO_PKG_VERSION`，远端 prompt 由 `p2p[remote:/]` 换成远端真实授权完整路径；status 重排为用户可读的 Control/ICE、Data、授权目录及传输任务分区；TTY 进度用 \r 覆盖刷新同一行，非TTY保留换行以兼容自动测试；帮助信息重新布局。
+- 本机操作和远端 RPC 均接受**位于各自授权共享根内**的绝对路径。允许用户显式设置 `P2P_TRANSFER_SHARE_ROOT=/`（Unix）并在启动时明确同意授权整台设备；默认共享仍仅为工作目录，不会悄悄突破 cap-std Directory 安全边界。Windows 跨磁盘根目录尚未实现。
+- 仍需：真实双机完成2GiB SHA、远端取消/恢复与全部四 Data lane 故障重试测试；全系统任意磁盘非授权访问仍受到保护。本 PR 不能在 CI 完成前合并。
