@@ -10,7 +10,8 @@ use transfer_core::{
     modern_data_lanes::ModernDataLanes,
     cancel::{TransferCancels, canceled},
     progress::TransferProgress,
-    sdk_quic::{list_via_sdk, root_info_via_sdk, cancel_transfer_via_sdk,
+    sdk_quic::{list_via_sdk, root_info_via_sdk, starting_directory_via_sdk,
+        cancel_transfer_via_sdk,
         serve_control_stream, serve_control_stream_cancellable, request_get_via_sdk,
         SdkTransferError, send_via_managed_sdk_with_progress,
         serve_control_stream_with_lease, ControlIo, IncomingResult},
@@ -186,6 +187,23 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                     assert!(matches!(response.unwrap(), IncomingResult::DirectoryListed));
                     assert_eq!(
                         actual.unwrap(),
+                        std::fs::canonicalize(dir.join("B")).unwrap().to_str().unwrap(),
+                    );
+
+                    // Interactive CLI has a broader filesystem scope than
+                    // its launch cwd. Verify authenticated Control reports
+                    // the actual launch directory, not the filesystem root.
+                    let interactive_root = SharedRoot::for_interactive_shell(&dir.join("B")).unwrap();
+                    let (initial, answered) = tokio::join!(
+                        starting_directory_via_sdk(&creator, 16),
+                        async {
+                            let (send, recv) = joiner.control.accept_bi().await.unwrap();
+                            serve_control_stream(&joiner, &interactive_root, send, recv).await
+                        }
+                    );
+                    assert!(matches!(answered.unwrap(), IncomingResult::DirectoryListed));
+                    assert_eq!(
+                        initial.unwrap(),
                         std::fs::canonicalize(dir.join("B")).unwrap().to_str().unwrap(),
                     );
 
