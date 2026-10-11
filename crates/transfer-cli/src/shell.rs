@@ -17,6 +17,7 @@ use tokio::{sync::{mpsc, oneshot, Mutex}, task::JoinHandle};
 use rustyline::{Editor, error::ReadlineError, history::DefaultHistory};
 use transfer_core::{
     cancel::TransferCancels,
+    checksum::{hash_reader, HashAlgorithm},
     lease::TransferLease,
     progress::{TransferProgress, ProgressSnapshot},
     recursive::{gather_directory, ManifestEntry},
@@ -124,6 +125,9 @@ fn help() {
     println!("    put <本机> [远端]     上传文件或整个目录");
     println!("    get <远端> [本机]     下载文件或整个目录");
     println!("    cancel / Ctrl-C       仅任务发起设备可取消，保持连接");
+    println!("  本机文件校验");
+    println!("    sha256 <本机文件>    计算本地文件 SHA-256");
+    println!("    md5 <本机文件>       计算本地文件 MD5（仅用于比对）");
     println!("  会话与编辑");
     println!("    status                显示连接和任务状态");
     println!("    help                  显示本帮助");
@@ -644,9 +648,8 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                                         let _ = done.send(());
                                     }
                                 }
-                                Ok(IncomingResult::ServedGet(receipt)) => {
-                                    println!("\n[GET] 已回传 {} 字节", receipt.bytes);
-                                }
+                                // 发送端只显示传输进度，不重复打印回传统计。
+                                Ok(IncomingResult::ServedGet(_)) => {}
                                 Ok(IncomingResult::DirectoryListed) => {}
                                 Err(transfer_core::sdk_quic::SdkTransferError::Cancelled) => {
                                     // The SDK file handler clears only its own
@@ -859,6 +862,33 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             }
                             Err(err) => println!("[CD] {err:?}"),
                         }
+                    }
+                    "sha256" | "md5" if args.len() == 2 => {
+                        let path = match scoped_path(root.display_root(), &local_cwd, &args[1]) {
+                            Ok(path) => path,
+                            Err(err) => { eprintln!("[校验] 路径错误：{err}"); continue; }
+                        };
+                        let file = match root.open_read(&path) {
+                            Ok(file) => file,
+                            Err(err) => {
+                                eprintln!("[校验] 无法读取本机文件：{err:?}");
+                                continue;
+                            }
+                        };
+                        let algorithm = if cmd == "sha256" {
+                            HashAlgorithm::Sha256
+                        } else {
+                            HashAlgorithm::Md5
+                        };
+                        let display_path = display_absolute(root.display_root(), &path);
+                        // 在阻塞线程计算大文件摘要，避免占用 QUIC Control 事件循环。
+                        tokio::spawn(async move {
+                            match tokio::task::spawn_blocking(move || hash_reader(file, algorithm)).await {
+                                Ok(Ok(digest)) => println!("[{}] {}  {}", algorithm.name(), digest, display_path),
+                                Ok(Err(err)) => eprintln!("[校验] 文件读取失败：{err}"),
+                                Err(err) => eprintln!("[校验] 计算任务失败：{err}"),
+                            }
+                        });
                     }
                     "put" if (2..=3).contains(&args.len()) => {
                         let source = scoped_path(root.display_root(), &local_cwd, &args[1])?;
