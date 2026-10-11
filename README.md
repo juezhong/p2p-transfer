@@ -26,9 +26,10 @@ chmod +x p2p-transfer-linux-aarch64-musl
 
 SDK 负责 ICE/STUN、手动配对、双方设备证书 mTLS、独立 Control QUIC / Data QUIC；Transfer 负责文件/目录命令、4MiB 有界应用确认窗口、.part/SHA-256、权限与 UI。控制消息不会走数据载荷通道，也不提供 TURN/文件中继。
 
-**首个稳定 CLI 为 [v0.1.0](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.0)**，后续修复从此稳定基线的 `main` 开发，不再发布 `v0.1.0-test.N`。稳定 CLI 尚不等于所有网络环境下的完整 Go 功能对等；仍无 TURN/Relay，断线未确认数据块的自动重传、四 Data lane 并行 striping、完整 2GiB SHA 验收和跨 NAT/CGNAT 手工验收仍需补充；TUI/GUI 未正式交付。
+**稳定版本：** [v0.1.1](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.1)（修复任务发起方取消权限、双端任务状态与退出行为）；[v0.1.0](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.0) 为首个稳定 CLI。后续从 `main` 开发，不再发布 `v0.1.0-test.N`。稳定 CLI 尚不等于所有网络环境下的完整 Go 功能对等；仍无 TURN/Relay，断线未确认数据块的自动重传、四 Data lane 并行 striping、完整 2GiB SHA 验收和跨 NAT/CGNAT 手工验收仍需补充；TUI/GUI 未正式交付。
 
 - [当前功能状态与下一步](docs/STATUS.md)
+- [稳定版本规划与自动发布流程](docs/RELEASE_PROCESS.md)
 - [无参数交互 CLI 操作说明](docs/INTERACTIVE_CLI.md)
 - [两台机器的详细测试方案](docs/MANUAL_TEST_PREVIEW.md)
 - [Agent 交接工作流](docs/WORKFLOW.md)

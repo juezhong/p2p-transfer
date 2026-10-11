@@ -1,13 +1,16 @@
-name: Stable CLI release (test.8 source)
+name: Stable CLI release (versioned)
 
 on:
   pull_request:
     paths:
       - ".github/workflows/stable-release.yml"
+      - "crates/transfer-cli/Cargo.toml"
+      - "Cargo.lock"
   push:
     branches: [main]
     paths:
       - ".github/workflows/stable-release.yml"
+      - "crates/transfer-cli/Cargo.toml"
   workflow_dispatch:
 
 permissions:
@@ -17,25 +20,35 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  SOURCE_COMMIT: e78f2083b9807c7fdc1864e4c4cd9ea824ca0c62
-  STABLE_TAG: v0.1.0
-
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.SOURCE_COMMIT }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Verify exact test.8 source and version
+      - name: Validate stable CLI version, Cargo.lock and release notes
         shell: bash
         run: |
-          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
-          grep -q '^version = "0.1.0-test.8"$' crates/transfer-cli/Cargo.toml
+          python3 - <<'PY'
+          import pathlib
+          import re
+          import tomllib
+
+          cli = tomllib.loads(pathlib.Path("crates/transfer-cli/Cargo.toml").read_text())
+          version = cli["package"]["version"]
+          if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version):
+              raise SystemExit(f"Not a stable SemVer: {version}")
+          lock = tomllib.loads(pathlib.Path("Cargo.lock").read_text())
+          locked = [p["version"] for p in lock["package"] if p["name"] == "transfer-cli"]
+          if locked != [version]:
+              raise SystemExit(f"Cargo.lock mismatch: {locked} vs {version}")
+          notes = pathlib.Path(f"docs/releases/v{version}.md")
+          if not notes.is_file():
+              raise SystemExit(f"Missing release notes: {notes}")
+          print(f"Validated stable v{version} and release notes")
+          PY
       - name: Format Rust code in CI workspace only
         run: cargo fmt --all
       - name: Check Rust formatting
@@ -66,11 +79,9 @@ jobs:
       CC_aarch64_unknown_linux_musl: musl-gcc
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.SOURCE_COMMIT }}
-      - name: Verify exact test.8 source
+      - name: Verify checkout matches workflow commit
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Install musl toolchain
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools binutils
@@ -125,31 +136,33 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Ensure only CI workflow changed since test.8
-        shell: bash
-        run: |
-          set -euo pipefail
-          git merge-base --is-ancestor "$SOURCE_COMMIT" "$GITHUB_SHA"
-          test "$(git diff --name-only "$SOURCE_COMMIT" "$GITHUB_SHA")" = ".github/workflows/stable-release.yml"
       - uses: actions/download-artifact@v4
         with:
           pattern: stable-*
           merge-multiple: true
           path: dist
-      - name: Publish stable release from original test.8 commit
+      - name: Publish versioned stable release without overwriting tags
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh release view "$STABLE_TAG" >/dev/null 2>&1; then
-            echo "$STABLE_TAG already exists; will not overwrite."
-            exit 0
+          VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("crates/transfer-cli/Cargo.toml", "rb"))["package"]["version"])')"
+          TAG="v${VERSION}"
+          NOTES="docs/releases/${TAG}.md"
+          test -f "$NOTES"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Release $TAG already exists; not overwriting the tag or assets."
+              exit 0
+            fi
+            echo "Tag $TAG exists without a GitHub Release; refusing to overwrite it." >&2
+            exit 1
           fi
           test "$(find dist -maxdepth 1 -name 'p2p-transfer-*' -type f | wc -l)" -eq 7
+          for binary in             p2p-transfer-windows-x86_64.exe             p2p-transfer-macos-x86_64             p2p-transfer-macos-aarch64             p2p-transfer-linux-x86_64             p2p-transfer-linux-aarch64             p2p-transfer-linux-x86_64-musl             p2p-transfer-linux-aarch64-musl; do
+            test -s "dist/$binary"
+          done
           (cd dist && sha256sum p2p-transfer-* > SHA256SUMS.txt)
-          gh release create "$STABLE_TAG" dist/p2p-transfer-* dist/SHA256SUMS.txt \
-            --target "$SOURCE_COMMIT" \
-            --title "p2p-transfer v0.1.0 (stable CLI, test.8 baseline)" \
-            --notes "首个稳定 CLI 版本。完全采用 v0.1.0-test.8 的原始源码提交与依赖锁定，未修改业务代码。七目标重新测试、构建并附 SHA256SUMS.txt。注意：由于原始代码未修改，程序 --version 仍显示 0.1.0-test.8。现有网络恢复、2 GiB 和 NAT 验收限制保持不变。Unix 配对设备可按运行账户权限访问本机文件系统，请勿以 root 与不可信设备连接。" \
-            --latest
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+          gh release create "$TAG" dist/p2p-transfer-* dist/SHA256SUMS.txt             --target "$GITHUB_SHA"             --title "p2p-transfer $TAG (stable CLI)"             --notes-file "$NOTES"             --latest
