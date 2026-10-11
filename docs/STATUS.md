@@ -239,3 +239,10 @@
 - test.8：取消本端活跃的 Remote-initiated Transfer，包括 registry 的传输 ID；取消请求异步并确认后返回，Control 消息泵始终畅通；状态区分远端发起任务。发送/接收路径由 SharedRoot 的显示根恢复为真正的本机绝对路径，进度只显示剩余 ETA。
 - Unix terminal 单线程 owner 的屏幕清理和输入线程退出路径修复；备份并还原 termios，避免退出后仍残留终端 raw 模式。欢迎/帮助明确显示 quit / exit。
 - SDK 认证、ICE 与 Data pool 不改；真实 LAN 全 2GiB SHA、双向取消重试与跨 NAT 仍需用户的实体设备复测。完整 CI 全绿且发行 job 确实上传资产之前不得称 test.8 已发布。
+
+## 2026-10-11：首个稳定 CLI v0.1.0
+
+- 用户已验收 v0.1.0-test.8 并同意首个稳定 CLI 发布。功能基线为 `e78f2083b9807c7fdc1864e4c4cd9ea824ca0c62`；仅变更版本元数据、文档和 CI 发布配置。
+- 正式发布重新构建并测试 7 个目标，生成 SHA256SUMS.txt，标签 `v0.1.0` 不使用 prerelease，需经 fmt、Clippy、workspace tests 与 7 平台测试/构建通过。
+- 正式 CLI 不代表完整 Go 功能对等、TUI/GUI 或公网 NAT、2GiB 和断线可靠性验收。Unix 配对方可按运行账户权限访问整个文件系统，需明确告知风险。
+

@@ -6,7 +6,7 @@
 
 **不需要命令行地址、端口或发送/接收参数**。打开终端进入你希望共享的目录，直接运行 `p2p-transfer`。程序会显示「创建连接 / 加入连接 / 退出」，双方私下交换 INVITE/REPLY 并核对六位码后，在同一个交互 shell 中使用 `ls/cd/pwd`、`lls/lcd/lpwd`、`put/get`、`status/cancel/quit`。可以传输文件及递归目录。
 
-每次运行需明确授权当前共享根目录；远端文件系统操作被限制在授权目录之内。这与 Go 旧版本默认可访问全部用户可读写路径的行为**有意不同**，不能为模仿旧行为而破坏默认安全性。
+**安全提示：** 首个稳定 CLI 延续 test.8 的交互行为：Unix 端配对设备可在运行账户权限范围内访问整个本机文件系统，Windows 端目前限启动盘符。**配对不等于文件权限隔离**；不要以 root 运行或与不可信设备配对，务必通过可信私密渠道传递 INVITE/REPLY。
 
 ## Linux ARM64 / RK3568 兼容性
 
@@ -26,7 +26,7 @@ chmod +x p2p-transfer-linux-aarch64-musl
 
 SDK 负责 ICE/STUN、手动配对、双方设备证书 mTLS、独立 Control QUIC / Data QUIC；Transfer 负责文件/目录命令、4MiB 有界应用确认窗口、.part/SHA-256、权限与 UI。控制消息不会走数据载荷通道，也不提供 TURN/文件中继。
 
-**尚处开发阶段，未发布稳定功能完整版本。** Go 对等的 Data QUIC 自动重建/未确认块重传、四条数据 QUIC、长期 ICE consent/restart、网关自动发现/续期、Tab 补全、2GiB 实测和跨 NAT 手工验收仍需完成；TUI/GUI 延后。
+**首个稳定 CLI 为 [v0.1.0](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.0)**，基于 `v0.1.0-test.8` 功能代码构建，仅更改版本与发布元数据，不代表已实现 Go 全量功能对等或生产级断线可靠性。仍无 TURN/Relay；未确认块重传、四 Data 并行 striping、完整 2GiB SHA 校验和跨 NAT/CGNAT/IPv6 手工验收尚待补充，TUI/GUI 尚未正式交付。
 
 - [当前功能状态与下一步](docs/STATUS.md)
 - [无参数交互 CLI 操作说明](docs/INTERACTIVE_CLI.md)
