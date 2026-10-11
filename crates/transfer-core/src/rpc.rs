@@ -18,6 +18,7 @@ const RELEASE_TRANSFER_OP: u8 = 6;
 const ROOT_INFO_OP: u8 = 7;
 const CANCEL_TRANSFER_OP: u8 = 8;
 const START_DIRECTORY_OP: u8 = 9;
+const TRANSFER_STATUS_OP: u8 = 10;
 const MAX_ENTRIES: usize = 8192;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub enum RpcRequest {
     CancelTransfer,
     /// Displays the peer's launch working directory, not just its root.
     StartDirectory,
+    TransferStatus,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,6 +90,7 @@ impl RpcRequest {
             Self::RootInfo => bytes.push(ROOT_INFO_OP),
             Self::CancelTransfer => bytes.push(CANCEL_TRANSFER_OP),
             Self::StartDirectory => bytes.push(START_DIRECTORY_OP),
+            Self::TransferStatus => bytes.push(TRANSFER_STATUS_OP),
             Self::Get { source, destination } => {
                 bytes.push(GET_OP);
                 push_string(&mut bytes, source)?;
@@ -115,6 +118,7 @@ impl RpcRequest {
             ROOT_INFO_OP => Self::RootInfo,
             CANCEL_TRANSFER_OP => Self::CancelTransfer,
             START_DIRECTORY_OP => Self::StartDirectory,
+            TRANSFER_STATUS_OP => Self::TransferStatus,
             GET_OP => Self::Get {
                 source: read_string(bytes, &mut pos)?.to_owned(),
                 destination: read_string(bytes, &mut pos)?.to_owned(),
@@ -236,6 +240,7 @@ mod tests {
             RpcRequest::AcquireTransfer,
             RpcRequest::RootInfo,
             RpcRequest::StartDirectory,
+            RpcRequest::TransferStatus,
             RpcRequest::CancelTransfer,
             RpcRequest::ReleaseTransfer,
         ] {
