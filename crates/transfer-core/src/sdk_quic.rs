@@ -731,7 +731,7 @@ pub async fn serve_control_stream_cancellable(
                 }
                 Ok(RpcRequest::TransferStatus) => {
                     if let Some((arbiter, remote_grant)) = lease {
-                        let state = authoritative_task_status(arbiter, &remote_grant.lock().await);
+                        let state = authoritative_task_status(arbiter, &*remote_grant.lock().await);
                         write_frame(&mut control, FrameKind::RpcResponse, request_id,
                             state.encode()).await?;
                     } else {
