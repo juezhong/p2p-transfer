@@ -1004,7 +1004,7 @@ mod transfer_lease_rpc_tests {
         assert!(remote.acquire(&lease, 7));
         let state = authoritative_task_status(&lease, &remote);
         assert_eq!(state, SessionTaskStatus::Joiner(7));
-        assert_eq!(SessionTaskStatus::decode(&state.encode()), Ok(state));
+        assert!(matches!(SessionTaskStatus::decode(&state.encode()), Ok(value) if value == state));
         assert!(SessionTaskStatus::decode(b"JOINER:0").is_err());
         assert!(SessionTaskStatus::decode(b"OTHER:7").is_err());
         assert!(remote.release(7));
