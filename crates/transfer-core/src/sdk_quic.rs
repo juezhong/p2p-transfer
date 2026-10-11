@@ -646,6 +646,22 @@ pub async fn serve_control_stream_cancellable(
                     }
                     Ok(IncomingResult::DirectoryListed)
                 }
+                Ok(RpcRequest::StartDirectory) => {
+                    // Display-only information about the launch cwd. File
+                    // access still runs through SharedRoot's Dir capability.
+                    match root.starting_directory().to_str() {
+                        Some(path) if path.len() <= 4096 => {
+                            write_frame(&mut control, FrameKind::RpcResponse, request_id,
+                                path.as_bytes().to_vec()).await?;
+                            Ok(IncomingResult::DirectoryListed)
+                        }
+                        _ => {
+                            write_frame(&mut control, FrameKind::Error, request_id,
+                                b"starting directory unavailable".to_vec()).await?;
+                            Err(SdkTransferError::InvalidDataStream)
+                        }
+                    }
+                }
                 Ok(RpcRequest::RootInfo) => {
                     // This is the root that THIS USER explicitly authorized.
                     // Never reveal unrelated process paths or follow a remote path.
@@ -749,7 +765,24 @@ pub async fn root_info_via_sdk(
     session: &dyn AuthenticatedSession,
     request_id: u64,
 ) -> Result<String, SdkTransferError> {
-    let response = request_rpc(session, RpcRequest::RootInfo, request_id).await?;
+    display_path_rpc(session, RpcRequest::RootInfo, request_id).await
+}
+
+/// Exact working directory on the peer when its interactive CLI started.
+/// When the scope is /, it is usually different from RootInfo.
+pub async fn starting_directory_via_sdk(
+    session: &dyn AuthenticatedSession,
+    request_id: u64,
+) -> Result<String, SdkTransferError> {
+    display_path_rpc(session, RpcRequest::StartDirectory, request_id).await
+}
+
+async fn display_path_rpc(
+    session: &dyn AuthenticatedSession,
+    request: RpcRequest,
+    request_id: u64,
+) -> Result<String, SdkTransferError> {
+    let response = request_rpc(session, request, request_id).await?;
     if response.payload.len() > 4096 {
         return Err(SdkTransferError::InvalidDataStream);
     }
