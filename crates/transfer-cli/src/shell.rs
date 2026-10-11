@@ -806,7 +806,9 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             }
                             None => println!("  任务状态    暂时无法从创建方同步"),
                         }
-                        if let Some(snapshot) = progress.snapshot() {
+                        if matches!(shared_task, Some(SessionTaskStatus::Idle)) {
+                            println!("  文件        无进行中进度");
+                        } else if let Some(snapshot) = progress.snapshot() {
                             println!("  文件 ID     {}", snapshot.request_id);
                             println!("  文件        {} {:.1}% · {}/{} MiB · {:.1} MiB/s",
                                 snapshot.file, snapshot.percent(),
