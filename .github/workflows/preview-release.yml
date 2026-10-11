@@ -1,14 +1,14 @@
-name: Preview release (five platforms)
+name: Seven-target CLI build verification
 
 on:
   pull_request:
   push:
     branches: [main]
     paths:
-      - "PREVIEW_VERSION"
       - ".github/workflows/preview-release.yml"
       - "crates/**"
       - "Cargo.toml"
+      - "Cargo.lock"
   workflow_dispatch:
 
 concurrency:
@@ -102,39 +102,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "dist/${{ matrix.filename }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: preview-${{ matrix.target }}
+          name: cli-build-${{ matrix.target }}
           path: dist/${{ matrix.filename }}
           if-no-files-found: error
           retention-days: 30
-
-  publish:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: preview-*
-          merge-multiple: true
-          path: dist
-      - name: Publish explicit pre-release version if not yet present
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          TAG="$(tr -d '[:space:]' < PREVIEW_VERSION)"
-          [[ "$TAG" == v*-test.* ]] || { echo "Invalid preview tag" >&2; exit 1; }
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Preview $TAG already published; will not overwrite immutable test assets."
-            exit 0
-          fi
-          test "$(find dist -maxdepth 1 -name 'p2p-transfer-*' -type f | wc -l)" -eq 7
-          (cd dist && sha256sum p2p-transfer-* > SHA256SUMS.txt)
-          gh release create "$TAG" dist/p2p-transfer-* dist/SHA256SUMS.txt \
-            --target "$GITHUB_SHA" --prerelease --title "p2p-transfer $TAG (NAT field-test preview)" \
-            --notes-file "docs/releases/preview-$TAG.md"
