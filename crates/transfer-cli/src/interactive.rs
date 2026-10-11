@@ -61,30 +61,15 @@ pub async fn run() -> CliResult<()> {
             _ => println!("请输入 1、2 或 3"),
         }
     };
-    // An explicit opt-in can authorize a larger filesystem tree. On Unix,
-    // P2P_TRANSFER_SHARE_ROOT=/ permits absolute paths across the host; do
-    // not grant that automatically as a side effect of code exchange.
-    let dir = match std::env::var_os("P2P_TRANSFER_SHARE_ROOT") {
-        Some(path) => std::fs::canonicalize(path).map_err(debug_error)?,
-        None => std::env::current_dir().map_err(debug_error)?,
-    };
-    println!("\n本次连接将共享的本机目录：");
-    println!("  {}", dir.display());
-    println!("对端连接成功后，可以列出并下载该目录内的文件及子目录，");
-    println!("也可以向该目录内上传文件或创建子目录（不会覆盖已有文件）。");
-    println!("对端不能读取或写入此目录以外的路径；本次授权仅在当前会话有效。");
-    if dir.parent().is_none() {
-        println!("[高风险] 当前选择的是文件系统根目录，配对设备可访问本机权限允许的所有文件！");
-    }
-    println!("如需使用其他绝对路径，可在启动前设置 P2P_TRANSFER_SHARE_ROOT 为要授权的目录。");
-    let answer = prompt(&format!(
-        "确认允许对端访问【{}】及其子目录？输入 yes 授权，其余输入取消：",
-        dir.display()
-    ))?;
-    if answer != "yes" {
-        return Err("未授权目录；会话未建立".into());
-    }
-    let root = Arc::new(SharedRoot::authorize(&dir).map_err(debug_error)?);
+    let cwd = std::env::current_dir().map_err(debug_error)?;
+    let root = Arc::new(SharedRoot::for_interactive_shell(&cwd)
+        .map_err(debug_error)?);
+    println!("\n本机初始目录：{}", root.starting_directory().display());
+    #[cfg(unix)]
+    println!("[文件访问] 与 Go 版一致：连接后可访问本机操作系统权限允许的文件和目录，\n             包括初始目录外的绝对路径；配对设备也能读写本机这些路径。");
+    #[cfg(windows)]
+    println!("[文件访问] 默认可浏览本机启动所在盘符内具备操作系统权限的目录；\n             跨盘符访问仍待单独适配。");
+    println!("[安全提示] 请只与可信设备配对，不要以高权限账户运行传输程序。");
     let interfaces = local_addresses()
         .map_err(|err| format!("无法枚举本机网络接口：{err}"))?;
     if interfaces.is_empty() {
