@@ -135,7 +135,7 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
         if line.contains("失败：") || line.contains("Transfer failed:") {
             let _ = a.kill();
             let _ = b.kill();
-            panic!("Go-style shell failed: {:?}", transcript);
+            panic!("Go-style shell failed on {peer:?}: {line:?}; earlier output: {transcript:?}");
         }
         let secret = line.contains("P2PR-INV2-") || line.contains("P2PR-REP2-");
         if transcript.len() < 100 {
