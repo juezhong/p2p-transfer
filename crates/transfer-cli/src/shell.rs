@@ -22,7 +22,7 @@ use transfer_core::{
     progress::{TransferProgress, ProgressSnapshot},
     recursive::{gather_directory, ManifestEntry},
     rpc::list_in_root,
-    sdk_quic::{acquire_transfer_via_sdk, release_transfer_via_sdk, list_typed_via_sdk, list_via_sdk, root_info_via_sdk, mkdir_via_sdk, request_get_via_sdk, cancel_transfer_via_sdk, send_via_managed_sdk_cancellable, serve_control_stream_cancellable, IncomingResult, RemoteLeaseGrant},
+    sdk_quic::{acquire_transfer_via_sdk, release_transfer_via_sdk, list_typed_via_sdk, list_via_sdk, root_info_via_sdk, starting_directory_via_sdk, mkdir_via_sdk, request_get_via_sdk, cancel_transfer_via_sdk, send_via_managed_sdk_cancellable, serve_control_stream_cancellable, IncomingResult, RemoteLeaseGrant},
     secure_io::SharedRoot,
 };
 
@@ -92,7 +92,7 @@ fn help() {
     println!("  quit / exit                    关闭会话并退出");
     println!("────────────────────────────────");
     println!("路径可用中文/空格（用双引号）和 Tab 补全。");
-    println!("绝对路径只允许访问各设备本次已授权的共享目录。");
+    println!("绝对路径按本机系统文件权限访问；Unix 可通过 cd .. 走出启动目录。");
     println!("PUT/GET 占用前台直到结束；不支持断点续传。");
 }
 
@@ -403,12 +403,13 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let (prompt_ready, ready_rx) = std::sync::mpsc::channel();
     let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
-    let prompt_label = Arc::new(StdMutex::new("远端:/> ".to_owned()));
+    let prompt_label = Arc::new(StdMutex::new("远端路径同步中> ".to_owned()));
     help();
     input_thread(tx, ready_rx, completion_tx, Arc::clone(&prompt_label));
-    let mut local_cwd = PathBuf::new();
+    let mut local_cwd = root.starting_relative()
+        .map_err(|err| format!("初始目录不在本机访问范围内：{err:?}"))?;
     let mut remote_cwd = PathBuf::new();
-    let mut previous_local = PathBuf::new();
+    let mut previous_local = local_cwd.clone();
     let mut previous_remote = PathBuf::new();
     let mut task: Option<JoinHandle<()>> = None;
     let mut active_batch_id: Option<u64> = None;
@@ -419,14 +420,23 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut disconnected = false;
     let mut remote_root: Option<String> = None;
-    let (root_tx, mut root_rx) = mpsc::unbounded_channel();
+    let (root_tx, mut root_rx) = mpsc::unbounded_channel::<(String, String)>();
     let mut root_fetch_finished = false;
     let session_for_root = Arc::clone(&session);
     tokio::spawn(async move {
-        if let Ok(Ok(path)) = tokio::time::timeout(
-            Duration::from_secs(6), root_info_via_sdk(&session_for_root, next_id())
+        // Both peers enter their Control accept loop before this resolves.
+        // Root is the accessible filesystem scope (e.g. "/"); startup cwd
+        // is a DIFFERENT path to display in the shell and use by default.
+        if let Ok(Ok((scope, start))) = tokio::time::timeout(
+            Duration::from_secs(8),
+            async {
+                tokio::try_join!(
+                    root_info_via_sdk(&session_for_root, next_id()),
+                    starting_directory_via_sdk(&session_for_root, next_id()),
+                )
+            },
         ).await {
-            let _ = root_tx.send(path);
+            let _ = root_tx.send((scope, start));
         }
     });
     let mut incoming_workers = tokio::task::JoinSet::new();
@@ -435,12 +445,22 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
         tokio::select! {
             root_message = root_rx.recv(), if !root_fetch_finished => {
                 root_fetch_finished = true;
-                if let Some(path) = root_message {
-                    println!("\n[目录] 对端授权路径：{path}");
-                    if let Ok(mut prompt) = prompt_label.lock() {
-                        *prompt = format!("{}> ", display_absolute(Path::new(&path), &remote_cwd));
+                if let Some((scope, initial)) = root_message {
+                    let relative = Path::new(&initial).strip_prefix(&scope).ok()
+                        .and_then(|path| root_relative(Path::new(""), &path.to_string_lossy()).ok());
+                    if let Some(relative) = relative {
+                        previous_remote = relative.clone();
+                        remote_cwd = relative;
+                        println!("\n[目录] 对端初始目录：{initial}");
+                        if let Ok(mut prompt) = prompt_label.lock() {
+                            *prompt = format!("{}> ", display_absolute(Path::new(&scope), &remote_cwd));
+                        }
+                        remote_root = Some(scope);
+                    } else {
+                        eprintln!("[目录] 对端初始目录不在有效共享范围内，拒绝目录同步");
                     }
-                    remote_root = Some(path);
+                } else {
+                    eprintln!("[目录] 无法取得对端初始工作目录；请确认双方使用兼容版本");
                 }
             }
             query = completion_rx.recv() => {
