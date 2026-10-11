@@ -257,10 +257,11 @@ pub async fn send_via_managed_sdk_with_progress(
 pub async fn send_via_managed_sdk_cancellable(
     session: &dyn AuthenticatedSession,
     lanes: &dyn AuthenticatedDataStreams,
-    root: &SharedRoot, source: &Path, remote_destination: &str,
+    root: &SharedRoot, paths: (&Path, &str),
     request_id: u64, progress: Option<&TransferProgress>,
     cancels: &TransferCancels,
 ) -> Result<TransferReceipt, SdkTransferError> {
+    let (source, remote_destination) = paths;
     let (_guard, rx) = cancels.register(request_id)
         .ok_or(SdkTransferError::InvalidDataStream)?;
     tokio::select! {
@@ -516,20 +517,20 @@ pub async fn serve_control_stream_with_lease_and_progress(
     lanes: Option<&dyn AuthenticatedDataStreams>,
     progress: Option<&TransferProgress>,
 ) -> Result<IncomingResult, SdkTransferError> {
-    serve_control_stream_cancellable(session, root, send, recv, lease, lanes, progress, None).await
+    serve_control_stream_cancellable(session, root, (send, recv), lease, lanes, progress, None).await
 }
 
 /// Dispatch with a session-scoped cross-QUIC cancel registry.
 pub async fn serve_control_stream_cancellable(
     session: &dyn AuthenticatedSession,
     root: &SharedRoot,
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
+    streams: (quinn::SendStream, quinn::RecvStream),
     lease: Option<(&crate::lease::TransferLease, &RemoteLeaseGrant)>,
     lanes: Option<&dyn AuthenticatedDataStreams>,
     progress: Option<&TransferProgress>,
     cancels: Option<&TransferCancels>,
 ) -> Result<IncomingResult, SdkTransferError> {
+    let (send, recv) = streams;
     let mut control = ControlIo::new(recv, send);
     let first = read_frame(&mut control).await?;
     match first.kind {
