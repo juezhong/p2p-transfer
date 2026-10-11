@@ -106,7 +106,7 @@ pub(crate) fn relative_string(path: &Path) -> CliResult<String> {
 
 fn introduction() {
     println!("远端：pwd / ls / cd    本地：lpwd / lls / lcd");
-    println!("传输：put / get / cancel    会话：status / help / quit");
+    println!("传输：put / get / cancel    会话：status / help / quit / exit");
     println!("Tab 可补全命令及路径；Ctrl-C 可取消当前任务。");
 }
 
@@ -123,11 +123,11 @@ fn help() {
     println!("  文件传输");
     println!("    put <本机> [远端]     上传文件或整个目录");
     println!("    get <远端> [本机]     下载文件或整个目录");
-    println!("    cancel / Ctrl-C       双端取消当前任务，不断开");
+    println!("    cancel / Ctrl-C       任意一端取消当前文件任务，保持连接");
     println!("  会话与编辑");
     println!("    status                显示连接和任务状态");
     println!("    help                  显示本帮助");
-    println!("    quit / exit           断开并退出");
+    println!("    quit / exit           正常断开连接并退出程序");
     println!("    Tab / ↑↓              补全路径 / 浏览历史");
     println!("════════════════════════════════════════════════════");
     println!("支持绝对路径、中文文件名；含空格的路径使用双引号。");
@@ -171,7 +171,11 @@ fn input_thread(
                     Err(_) => "quit".to_owned(),
                 }
             };
-            if tx.send(line).is_err() || ready.recv().is_err() { break; }
+            // Quit is terminal: do not wait for Ready and then open another
+            // raw-mode editor while the Tokio thread is closing QUIC.
+            let is_quit = matches!(line.trim().to_ascii_lowercase().as_str(),
+                "quit" | "exit" | "bye");
+            if tx.send(line).is_err() || is_quit || ready.recv().is_err() { break; }
         }
     });
 }
@@ -379,21 +383,29 @@ fn describe_link(peer: &ActivePeer) -> &'static str {
     } else { "IPv4 ICE 直连" }
 }
 
-fn print_progress(p: &ProgressSnapshot) {
+fn format_progress(p: &ProgressSnapshot) -> String {
     let rate = p.bytes_per_second() / (1024.0 * 1024.0);
     let eta = p.eta().map(|d| format!("{}s", d.as_secs()))
         .unwrap_or_else(|| "计算中".to_owned());
-    let msg = format!(
-        "[{}] {} {:5.1}%  {}/{} MiB  {:.2} MiB/s  已用 {}s  剩余 {}",
+    format!(
+        "[{}] {} {:5.1}%  {}/{} MiB  {:.2} MiB/s  预计剩余 {}",
         p.direction, p.file, p.percent(),
         p.written / 1_048_576, p.total / 1_048_576,
-        rate, p.elapsed.as_secs(), eta,
-    );
-    crate::terminal::progress(Some(msg));
+        rate, eta,
+    )
 }
 
+fn print_progress(p: &ProgressSnapshot) {
+    crate::terminal::progress(Some(format_progress(p)));
+}
+
+/// Cancel any file task on this authenticated session, regardless of
+/// which peer initiated PUT/GET. An inbound file never has a local CLI
+/// JoinHandle, so we MUST include the receiver/sender registry's live IDs.
+/// Remote RPCs run in a separate task so the Control accept loop keeps
+/// servicing the peer while both sides try to cancel simultaneously.
 async fn cancel_current(
-    session: &dyn AuthenticatedSession,
+    session: &Arc<p2p_sdk::transport_session::ConnectedTransportPeer>,
     worker: &mut Option<JoinHandle<()>>,
     batch: &mut Option<u64>,
     is_creator: bool,
@@ -401,39 +413,52 @@ async fn cancel_current(
     progress: &TransferProgress,
     registry: &TransferCancels,
 ) -> bool {
-    // Collect IDs before abort: the GET guard removes pending state on Drop.
-    let mut ids: Vec<u64> = pending.lock().await.keys().copied().collect();
+    let mut ids: Vec<u64> = registry.active_ids();
+    for id in pending.lock().await.keys().copied() {
+        if !ids.contains(&id) { ids.push(id); }
+    }
     if let Some(p) = progress.snapshot() {
         if p.request_id != 0 && !ids.contains(&p.request_id) {
             ids.push(p.request_id);
         }
     }
-    let mut interrupted = false;
-    if let Some(handle) = worker.take() {
-        if !handle.is_finished() { interrupted = true; handle.abort(); }
+    // Trigger cancellation before awaiting the worker. Both remote-initiated
+    // file streams and locally initiated ones are covered.
+    for id in &ids { registry.cancel(*id); }
+    let local_worker = worker.take();
+    let interrupted = !ids.is_empty() || local_worker
+        .as_ref().is_some_and(|handle| !handle.is_finished());
+    if let Some(handle) = local_worker {
+        handle.abort();
         let _ = handle.await;
     }
-    for id in ids {
-        interrupted = true;
-        registry.cancel(id);
-        match tokio::time::timeout(Duration::from_secs(5),
-            cancel_transfer_via_sdk(session, id)).await
-        {
-            Ok(Ok(CancelAck::Stopped)) =>
-                println!("\n[CANCEL] 对端文件任务 {id} 已停止"),
-            Ok(Ok(CancelAck::Pending)) =>
-                println!("\n[CANCEL] 对端已记录取消请求 {id}，尚未发现活动发送任务"),
-            _ => eprintln!("\n[CANCEL] 对端任务停止确认超时或失败（任务 {id}）"),
-        }
-    }
-    if let Some(id) = batch.take() {
-        if !is_creator {
-            let _ = tokio::time::timeout(Duration::from_secs(4),
-                release_transfer_via_sdk(session, id)).await;
-        }
-    }
+    let batch_id = batch.take();
     progress.clear();
-                crate::terminal::progress(None);
+    crate::terminal::progress(None);
+    if interrupted || batch_id.is_some() {
+        let peer = Arc::clone(session);
+        tokio::spawn(async move {
+            // Do not block the Control accept loop while waiting for the
+            // remote sender/receiver's completion acknowledgment.
+            for id in ids {
+                match tokio::time::timeout(Duration::from_secs(12),
+                    cancel_transfer_via_sdk(peer.as_ref(), id)).await
+                {
+                    Ok(Ok(CancelAck::Stopped)) =>
+                        println!("[CANCEL] 双端文件任务 {id} 均已停止"),
+                    Ok(Ok(CancelAck::Pending)) =>
+                        println!("[CANCEL] 已登记任务 {id} 的取消，远端尚未开始"),
+                    _ => eprintln!("[CANCEL] 文件任务 {id} 的远端停止确认失败"),
+                }
+            }
+            if let Some(id) = batch_id {
+                if !is_creator {
+                    let _ = tokio::time::timeout(Duration::from_secs(4),
+                        release_transfer_via_sdk(peer.as_ref(), id)).await;
+                }
+            }
+        });
+    }
     interrupted
 }
 
@@ -448,6 +473,7 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     drop(peer);
     if let Ok(owned) = Arc::try_unwrap(session) { owned.shutdown().await; }
     crate::terminal::progress(None);
+    crate::terminal::finish();
     result
 }
 
@@ -455,6 +481,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let session = Arc::clone(&peer.session);
     let data_lanes = Arc::clone(&peer.data_lanes);
     let active = Arc::new(AtomicBool::new(false));
+    let cancelling = Arc::new(AtomicBool::new(false));
     let arbiter = TransferLease::new();
     let remote_grant: RemoteLeaseGrant = Arc::new(Mutex::new(Default::default()));
     let is_creator = peer.role == "创建方";
@@ -570,8 +597,12 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                     if let Some(done) = task.take() {
                         if let Err(err) = done.await { eprintln!("[任务] 已中止：{err}"); }
                     }
-                    progress.clear();
-                crate::terminal::progress(None);
+                    // File RPC owns its progress snapshot. A completed
+                    // local CLI task may overlap an inbound peer transfer.
+                    if cancels.active_ids().is_empty() {
+                        progress.clear();
+                        crate::terminal::progress(None);
+                    }
                     active_batch_id = None;
                     active.store(false, Ordering::SeqCst);
                 }
@@ -606,9 +637,10 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                                 }
                                 Ok(IncomingResult::DirectoryListed) => {}
                                 Err(transfer_core::sdk_quic::SdkTransferError::Cancelled) => {
-                                    progress.clear();
-                crate::terminal::progress(None);
-                                    println!("\n[CANCEL] 该文件任务已由一端取消，Data 流已停止");
+                                    // The SDK file handler clears only its own
+                                    // request ID; another active transfer may
+                                    // already be reporting a new progress row.
+                                    println!("[CANCEL] 收发任务已经结束");
                                 },
                                 Err(err) => {
                                     if session.control().close_reason().is_none() {
@@ -713,8 +745,9 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         } else {
                             println!("  租约        空闲");
                         }
-                        println!("  本机命令    {}", if active.load(Ordering::SeqCst) {
-                            "执行中"
+                        println!("  传输任务    {}", if active.load(Ordering::SeqCst) ||
+                            !cancels.active_ids().is_empty() {
+                            "进行中（任意一端可以 cancel 或 Ctrl-C）"
                         } else { "空闲" });
                         if let Some(snapshot) = progress.snapshot() {
                             println!("  文件 ID     {}", snapshot.request_id);
@@ -784,6 +817,8 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let lease = arbiter.clone();
                         let progress = Arc::clone(&progress);
                         let cancels = Arc::clone(&cancels);
+                        cancelling.store(false, Ordering::SeqCst);
+                        let cancellation_flag = Arc::clone(&cancelling);
                         progress.clear();
                 crate::terminal::progress(None);
                         let batch_id = next_id();
@@ -793,7 +828,9 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                                 put_path(&session, &lanes, &root, &source, &remote, &progress, &cancels)).await;
                             match result {
                                 Ok(()) => println!("\n[PUT] 文件或目录任务完成"),
-                                Err(err) => eprintln!("\n[PUT] 失败：{err}"),
+                                Err(err) if cancellation_flag.load(Ordering::SeqCst) =>
+                                    println!("[PUT] 已取消：{err}"),
+                                Err(err) => eprintln!("[PUT] 失败：{err}"),
                             }
                             activity.store(false, Ordering::SeqCst);
                         }));
@@ -816,6 +853,8 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let activity = Arc::clone(&active);
                         let lease = arbiter.clone();
                         let progress = Arc::clone(&progress);
+                        cancelling.store(false, Ordering::SeqCst);
+                        let cancellation_flag = Arc::clone(&cancelling);
                         progress.clear();
                 crate::terminal::progress(None);
                         let batch_id = next_id();
@@ -826,19 +865,22 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                                     Path::new(&destination), &pending, &grant, is_creator)).await;
                             match result {
                                 Ok(()) => println!("\n[GET] 文件或目录任务全部校验提交"),
-                                Err(err) => eprintln!("\n[GET] 失败：{err}"),
+                                Err(err) if cancellation_flag.load(Ordering::SeqCst) =>
+                                    println!("[GET] 已取消：{err}"),
+                                Err(err) => eprintln!("[GET] 失败：{err}"),
                             }
                             activity.store(false, Ordering::SeqCst);
                         }));
                     }
                     "cancel" if args.len() == 1 => {
+                        cancelling.store(true, Ordering::SeqCst);
                         let was_running = cancel_current(
                             &session, &mut task, &mut active_batch_id,
                             is_creator, &pending_downloads, &progress, &cancels,
                         ).await;
                         if was_running {
                             active.store(false, Ordering::SeqCst);
-                            println!("[CANCEL] 取消流程已结束，会话保持连接");
+                            println!("[CANCEL] 本机任务已中断，正在等待对端停止确认；连接保持");
                         } else {
                             println!("[CANCEL] 当前没有活动的文件任务");
                         }
@@ -849,13 +891,14 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
             interrupt = tokio::signal::ctrl_c() => {
                 match interrupt {
                     Ok(()) => {
+                        cancelling.store(true, Ordering::SeqCst);
                         let stopped = cancel_current(
                             &session, &mut task, &mut active_batch_id,
                             is_creator, &pending_downloads, &progress, &cancels,
                         ).await;
                         active.store(false, Ordering::SeqCst);
                         if stopped {
-                            println!("\n[CANCEL] 取消流程已结束，会话继续保持");
+                            println!("[CANCEL] 本机任务已中断，正在等待对端停止确认；连接保持");
                         } else {
                             println!("\n[CANCEL] 当前没有正在进行的传输，输入 quit 可退出");
                         }
@@ -894,5 +937,15 @@ mod tests {
         );
         assert!(scoped_remote(None, Path::new(""), "/outside").is_err());
         assert!(scoped_remote(None, Path::new(""), "relative").is_err());
+    }
+    #[test]
+    fn progress_only_shows_absolute_file_and_remaining_time() {
+        let tracking = TransferProgress::default();
+        tracking.begin_id(7, "发送", "/tmp/source 2GB.bin".into(), 8_388_608);
+        tracking.written(4_194_304);
+        let line = format_progress(&tracking.snapshot().unwrap());
+        assert!(line.contains("/tmp/source 2GB.bin"));
+        assert!(line.contains("预计剩余"));
+        assert!(!line.contains("已用"));
     }
 }

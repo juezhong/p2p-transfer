@@ -102,6 +102,14 @@ mod tests {
         assert!(s.eta().is_some());
         p.written(200);
         assert_eq!(p.snapshot().unwrap().written, 100);
+        // A late finish/cancellation for a previous request must not
+        // accidentally clear the currently displayed file's progress.
+        p.begin_id(7, "接收", "/tmp/target.bin".into(), 100);
+        p.clear_request(8);
+        assert_eq!(p.snapshot().unwrap().request_id, 7);
+        p.clear_request(7);
+        assert!(p.snapshot().is_none());
+        p.begin("PUT", "2GB.bin".into(), 100);
         p.clear();
         assert!(p.snapshot().is_none());
     }

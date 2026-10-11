@@ -28,6 +28,14 @@ struct Screen {
 
 static SCREEN: OnceLock<Arc<Mutex<Screen>>> = OnceLock::new();
 
+#[cfg(unix)]
+static RAW_BACKUP: OnceLock<Mutex<Option<(i32, libc::termios)>>> = OnceLock::new();
+
+#[cfg(unix)]
+fn raw_backup() -> &'static Mutex<Option<(i32, libc::termios)>> {
+    RAW_BACKUP.get_or_init(|| Mutex::new(None))
+}
+
 fn shared() -> &'static Arc<Mutex<Screen>> {
     SCREEN.get_or_init(|| Arc::new(Mutex::new(Screen::default())))
 }
@@ -132,6 +140,37 @@ fn redraw(screen: &mut Screen) {
     let _ = out.flush();
 }
 
+/// Drop any screen rows still owned by the interactive editor, before
+/// the parent system shell resumes drawing its own prompt.
+pub fn finish() {
+    #[cfg(unix)]
+    if let Ok(mut original) = raw_backup().lock() {
+        if let Some((fd, termios)) = original.take() {
+            // SAFETY: original settings are captured before entering raw
+            // mode on this same controlling terminal.
+            unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios); }
+        }
+    }
+    if !io::stdout().is_terminal() { return; }
+    if let Ok(mut screen) = shared().lock() {
+        let mut out = io::stdout().lock();
+        if screen.active {
+            if screen.status_row {
+                let _ = write!(out, "\r\x1b[1A\r\x1b[2K\r\n\x1b[2K");
+            } else {
+                let _ = write!(out, "\r\x1b[2K");
+            }
+            let _ = writeln!(out);
+        }
+        screen.active = false;
+        screen.status_row = false;
+        screen.progress = None;
+        screen.input.clear();
+        screen.cursor = 0;
+        let _ = out.flush();
+    }
+}
+
 pub fn progress(text: Option<String>) {
     // Windows continues using rustyline rather than this Unix raw editor.
     // Do not silently swallow its live progress when stdout is a TTY.
@@ -206,6 +245,9 @@ impl RawMode {
                 return Err(io::Error::last_os_error());
             }
         }
+        if let Ok(mut saved) = raw_backup().lock() {
+            *saved = Some((fd, original));
+        }
         Ok(Self { fd, original })
     }
 }
@@ -214,6 +256,9 @@ impl Drop for RawMode {
     fn drop(&mut self) {
         // SAFETY: original state came from tcgetattr on this same fd.
         unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &self.original); }
+        if let Ok(mut saved) = raw_backup().lock() {
+            *saved = None;
+        }
     }
 }
 
@@ -276,26 +321,48 @@ pub fn read_line(prompt: &str, requests: &UnboundedSender<CompletionQuery>) -> i
                 let mut s = shared().lock().map_err(|_| io::Error::other("editor poisoned"))?;
                 let text = s.input.clone();
                 if !text.trim().is_empty() { s.history.push(text.clone()); }
+                let had_status = s.status_row;
                 s.active = false;
                 s.status_row = false;
                 s.progress = None;
-                let _ = write!(io::stdout(), "\r\n");
-                let _ = io::stdout().flush();
+                let mut out = io::stdout().lock();
+                if had_status {
+                    let _ = write!(out, "\r\x1b[1A\r\x1b[2K\r\n\x1b[2K");
+                }
+                let _ = write!(out, "\r\n");
+                let _ = out.flush();
                 break text;
             }
             3 => { // Ctrl-C in raw mode: cancel one task, keep the Control link.
                 let mut s = shared().lock().map_err(|_| io::Error::other("editor poisoned"))?;
+                let had_status = s.status_row;
                 s.active = false;
                 s.status_row = false;
                 s.progress = None;
-                let _ = write!(io::stdout(), "\r\n");
-                let _ = io::stdout().flush();
+                let mut out = io::stdout().lock();
+                if had_status {
+                    let _ = write!(out, "\r\x1b[1A\r\x1b[2K\r\n\x1b[2K");
+                }
+                let _ = write!(out, "^C\r\n");
+                let _ = out.flush();
                 break "cancel".to_owned();
             }
             4 => { // Ctrl-D
                 let empty = shared().lock().is_ok_and(|s| s.input.is_empty());
                 if empty {
-                    update_line(|s| { s.active = false; s.status_row = false; });
+                    let mut s = shared().lock().map_err(|_| io::Error::other("editor poisoned"))?;
+                    let had_status = s.status_row;
+                    s.active = false;
+                    s.status_row = false;
+                    s.progress = None;
+                    let mut out = io::stdout().lock();
+                    if had_status {
+                        let _ = write!(out, "\r\x1b[1A\r\x1b[2K\r\n\x1b[2K");
+                    } else {
+                        let _ = write!(out, "\r\x1b[2K");
+                    }
+                    let _ = write!(out, "\r\n");
+                    let _ = out.flush();
                     break "quit".to_owned();
                 }
             }

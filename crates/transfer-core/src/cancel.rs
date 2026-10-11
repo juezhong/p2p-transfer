@@ -44,6 +44,13 @@ impl Drop for CancellationGuard<'_> {
     }
 }
 impl TransferCancels {
+    /// IDs of live send or receive tasks. Used to permit either peer to
+    /// cancel an inbound transfer before the progress counter begins.
+    pub fn active_ids(&self) -> Vec<u64> {
+        self.inner.lock().map(|state| state.active.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
     pub fn register(&self, id: u64) -> Option<(CancellationGuard<'_>, watch::Receiver<bool>)> {
         if id == 0 { return None; }
         let mut s = self.inner.lock().ok()?;
@@ -103,6 +110,7 @@ mod tests {
     async fn cancellation_notifies_active_and_early_registration() {
         let registry = TransferCancels::default();
         let (_guard, receiver) = registry.register(13).unwrap();
+        assert_eq!(registry.active_ids(), vec![13]);
         assert!(registry.cancel(13));
         tokio::time::timeout(std::time::Duration::from_secs(1), canceled(receiver)).await.unwrap();
         drop(_guard);
