@@ -25,3 +25,8 @@
 
 `crates/transfer-cli/tests/interactive_loopback.rs` 启动两个真实无参数 CLI 进程，模拟菜单、显式根授权、手动 INVITE/REPLY、双方校验码、双 QUIC PUT、远端列表、双向 GET 后验证磁盘数据。五平台本地构建与测试为本阶段的自动 Gate。真实跨 NAT 最终由用户在两个不同网络的设备上测试。
 
+
+
+## 本机文件摘要
+
+`sha256 <本机文件>`、`md5 <本机文件>` 分别计算单种摘要；`checksum <本机文件>` 一次流式读取输出两行摘要。支持绝对/相对路径及引号路径；MD5 仅用于普通文件比较，安全校验推荐 SHA-256。
