@@ -750,7 +750,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             if session.control().close_reason().is_none() {
                                 "已连接"
                             } else { "已断开" },
-                            if d.control_outbound { "主动拨号" } else { "被动接入" });
+                            if d.bootstrap_outbound { "主动拨号" } else { "被动接入" });
                         println!("  本机 UDP    {}", d.actual_local_udp);
                         println!("  对端 UDP    {}", d.actual_remote_udp);
                         println!("  ICE         {:?} / 对端候选 {}",
