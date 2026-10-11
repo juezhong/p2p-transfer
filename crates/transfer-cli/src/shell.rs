@@ -1003,6 +1003,17 @@ mod tests {
         assert!(scoped_remote(None, Path::new(""), "relative").is_err());
     }
     #[test]
+    fn dropped_batch_owner_disables_remote_cancel_guard() {
+        let owned = Arc::new(AtomicBool::new(true));
+        let registry = TransferCancels::with_local_task(Arc::clone(&owned));
+        assert!(!registry.remote_cancel_allowed());
+        {
+            let _guard = LocalBatchOwner(Arc::clone(&owned));
+        }
+        assert!(registry.remote_cancel_allowed());
+    }
+
+    #[test]
     fn progress_only_shows_absolute_file_and_remaining_time() {
         let tracking = TransferProgress::default();
         tracking.begin_id(7, "发送", "/tmp/source 2GB.bin".into(), 8_388_608);
