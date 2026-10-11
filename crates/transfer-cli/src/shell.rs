@@ -402,14 +402,25 @@ fn describe_link(peer: &ActivePeer) -> &'static str {
 
 fn format_progress(p: &ProgressSnapshot) -> String {
     let rate = p.bytes_per_second() / (1024.0 * 1024.0);
-    let eta = p.eta().map(|d| format!("{}s", d.as_secs()))
-        .unwrap_or_else(|| "计算中".to_owned());
+    let eta = p.eta().map(|d| {
+        let seconds = d.as_secs();
+        format!("{:02}:{:02}", seconds / 60, seconds % 60)
+    }).unwrap_or_else(|| "计算中".to_owned());
+    let percent = p.percent().clamp(0.0, 100.0);
+    let filled = (percent / 10.0).round() as usize;
+    let bar = format!("{}{}", "#".repeat(filled), "-".repeat(10 - filled));
     format!(
-        "[{}] {} {:5.1}%  {}/{} MiB  {:.2} MiB/s  预计剩余 {}",
-        p.direction, p.file, p.percent(),
-        p.written / 1_048_576, p.total / 1_048_576,
-        rate, eta,
+        "[{}] [{}] {:5.1}% | {}/{} MiB | {:.1} MiB/s | 预计剩余 {} | {}",
+        p.direction, bar, percent,
+        p.written / 1_048_576, p.total / 1_048_576, rate, eta, p.file,
     )
+}
+
+/// 校验仅在双方没有传输任务时启动，避免并发读取大文件给磁盘带来额外压力。
+fn checksum_should_wait(
+    shared: SessionTaskStatus, local_active: bool, active_files: bool, has_progress: bool,
+) -> bool {
+    !matches!(shared, SessionTaskStatus::Idle) || local_active || active_files || has_progress
 }
 
 fn print_progress(p: &ProgressSnapshot) {
@@ -661,7 +672,8 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                                 },
                                 Err(err) => {
                                     if session.control().close_reason().is_none() {
-                                        eprintln!("\n[远端请求] 处理失败：{err:?}");
+                                        eprintln!("\n[传输失败] 文件尚未确认完成写盘和 SHA-256 校验：{err:?}");
+                                        eprintln!("[提示] 请核对接收端的剩余空间、写入权限和 .part 文件；不能将该次传输视为成功");
                                     }
                                 },
                             }
@@ -865,55 +877,86 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             Err(err) => println!("[CD] {err:?}"),
                         }
                     }
-                    "checksum" if args.len() == 2 => {
+                    "checksum" | "sha256" | "md5" if args.len() == 2 => {
                         let path = match scoped_path(root.display_root(), &local_cwd, &args[1]) {
                             Ok(path) => path,
                             Err(err) => { eprintln!("[校验] 路径错误：{err}"); continue; }
                         };
-                        let file = match root.open_read(&path) {
-                            Ok(file) => file,
-                            Err(err) => {
-                                eprintln!("[校验] 无法读取本机文件：{err:?}");
-                                continue;
-                            }
-                        };
                         let display_path = display_absolute(root.display_root(), &path);
-                        // 摘要只读取已打开的本机文件，在阻塞线程执行，不阻塞网络任务。
+                        let root = Arc::clone(&root);
+                        let session = Arc::clone(&session);
+                        let arbiter = arbiter.clone();
+                        let remote_grant = Arc::clone(&remote_grant);
+                        let activity = Arc::clone(&active);
+                        let registry = Arc::clone(&cancels);
+                        let transfer_progress = Arc::clone(&progress);
+                        let ready = PromptReady(prompt_ready.clone(), true);
+                        let algorithm = cmd.clone();
+                        // 只阻塞本机输入，不阻塞异步 Control/Data 事件循环。
+                        prompt_guard.1 = false;
+                        println!("[校验] 已接受任务：{display_path}");
                         tokio::spawn(async move {
-                            match tokio::task::spawn_blocking(move || hash_reader_both(file)).await {
-                                Ok(Ok((sha, md5))) => {
-                                    println!("SHA256  {sha}  {display_path}");
-                                    println!("MD5     {md5}  {display_path}");
+                            let _ready = ready;
+                            let mut notified_wait = false;
+                            loop {
+                                let session_status = if session.control().close_reason().is_some() {
+                                    SessionTaskStatus::Idle
+                                } else if is_creator {
+                                    authoritative_task_status(&arbiter, &*remote_grant.lock().await)
+                                } else {
+                                    match tokio::time::timeout(Duration::from_secs(3),
+                                        task_status_via_sdk(&session, next_id())).await {
+                                        Ok(Ok(status)) => status,
+                                        _ if session.control().close_reason().is_some() =>
+                                            SessionTaskStatus::Idle,
+                                        _ => {
+                                            eprintln!("[校验] 无法确认远端任务是否结束，已停止本次计算；可稍后重试");
+                                            return;
+                                        }
+                                    }
+                                };
+                                if !checksum_should_wait(
+                                    session_status,
+                                    activity.load(Ordering::SeqCst),
+                                    !registry.active_ids().is_empty(),
+                                    transfer_progress.snapshot().is_some(),
+                                ) {
+                                    break;
+                                }
+                                if !notified_wait {
+                                    println!("[校验] 文件传输仍在进行，等待传输结束后自动计算；不会重复读取文件");
+                                    notified_wait = true;
+                                }
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            }
+                            println!("[校验] 正在计算，请稍候（网络事件循环继续运行）...");
+                            // 传输结束后才打开文件，避免源文件占用时额外增加磁盘读负载。
+                            let file = match root.open_read(&path) {
+                                Ok(file) => file,
+                                Err(err) => {
+                                    eprintln!("[校验] 无法读取本机文件：{err:?}");
+                                    return;
+                                }
+                            };
+                            let result = tokio::task::spawn_blocking(move || {
+                                match algorithm.as_str() {
+                                    "checksum" => hash_reader_both(file).map(|(sha, md5)| {
+                                        vec![format!("SHA256  {sha}  {display_path}"),
+                                             format!("MD5     {md5}  {display_path}")]
+                                    }),
+                                    "sha256" => hash_reader(file, HashAlgorithm::Sha256).map(|value|
+                                        vec![format!("SHA256  {value}  {display_path}")]),
+                                    _ => hash_reader(file, HashAlgorithm::Md5).map(|value|
+                                        vec![format!("MD5     {value}  {display_path}")]),
+                                }
+                            }).await;
+                            match result {
+                                Ok(Ok(lines)) => {
+                                    for line in lines { println!("{line}"); }
+                                    println!("[校验] 完成");
                                 }
                                 Ok(Err(err)) => eprintln!("[校验] 文件读取失败：{err}"),
-                                Err(err) => eprintln!("[校验] 计算任务失败：{err}"),
-                            }
-                        });
-                    }
-                    "sha256" | "md5" if args.len() == 2 => {
-                        let path = match scoped_path(root.display_root(), &local_cwd, &args[1]) {
-                            Ok(path) => path,
-                            Err(err) => { eprintln!("[校验] 路径错误：{err}"); continue; }
-                        };
-                        let file = match root.open_read(&path) {
-                            Ok(file) => file,
-                            Err(err) => {
-                                eprintln!("[校验] 无法读取本机文件：{err:?}");
-                                continue;
-                            }
-                        };
-                        let algorithm = if cmd == "sha256" {
-                            HashAlgorithm::Sha256
-                        } else {
-                            HashAlgorithm::Md5
-                        };
-                        let display_path = display_absolute(root.display_root(), &path);
-                        // 在阻塞线程计算大文件摘要，避免占用 QUIC Control 事件循环。
-                        tokio::spawn(async move {
-                            match tokio::task::spawn_blocking(move || hash_reader(file, algorithm)).await {
-                                Ok(Ok(digest)) => println!("[{}] {}  {}", algorithm.name(), digest, display_path),
-                                Ok(Err(err)) => eprintln!("[校验] 文件读取失败：{err}"),
-                                Err(err) => eprintln!("[校验] 计算任务失败：{err}"),
+                                Err(err) => eprintln!("[校验] 计算任务异常终止：{err}"),
                             }
                         });
                     }
@@ -1073,6 +1116,16 @@ mod tests {
             let _guard = LocalBatchOwner(Arc::clone(&owned));
         }
         assert!(registry.remote_cancel_allowed());
+    }
+
+    #[test]
+    fn checksum_never_starts_while_remote_or_local_transfer_is_active() {
+        assert!(!checksum_should_wait(SessionTaskStatus::Idle, false, false, false));
+        assert!(checksum_should_wait(SessionTaskStatus::Creator(11), false, false, false));
+        assert!(checksum_should_wait(SessionTaskStatus::Joiner(11), false, false, false));
+        assert!(checksum_should_wait(SessionTaskStatus::Idle, true, false, false));
+        assert!(checksum_should_wait(SessionTaskStatus::Idle, false, true, false));
+        assert!(checksum_should_wait(SessionTaskStatus::Idle, false, false, true));
     }
 
     #[test]
