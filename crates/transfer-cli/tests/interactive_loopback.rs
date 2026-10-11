@@ -59,7 +59,10 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
     let exe = env!("CARGO_BIN_EXE_p2p-transfer");
     let (base, a_root, b_root) = fixture();
     let content = "Rust 控制面和数据面严格分开！".repeat(12_000);
-    fs::write(a_root.join("原始.txt"), content.as_bytes()).unwrap();
+    // Source and remote destination are BOTH outside each process's
+    // launch cwd. Go-style absolute paths must still work over authenticated
+    // QUIC and the filesystem must never be restricted to the startup dir.
+    fs::write(base.join("原始跨目录.txt"), content.as_bytes()).unwrap();
     let (tx, rx) = mpsc::channel::<(Peer, String)>();
     let mut a = launch(exe, &a_root, Peer::Creator, tx.clone());
     let mut b = launch(exe, &b_root, Peer::Joiner, tx);
@@ -110,14 +113,20 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
             enter(&mut a, "help");
             enter(&mut a, "status");
             enter(&mut b, "status");
-            enter(&mut a, "put 原始.txt 收到.txt");
+            enter(&mut a, &format!(
+                "put \"{}\" \"{}\"", base.join("原始跨目录.txt").display(),
+                base.join("远端副本.txt").display(),
+            ));
             put_sent = true;
         }
         if put_sent && !get_sent && peer == Peer::Creator
             && line.contains("[PUT] 文件或目录任务完成")
         {
             enter(&mut a, "ls");
-            enter(&mut a, "get 收到.txt 回传.txt");
+            enter(&mut a, &format!(
+                "get \"{}\" \"{}\"", base.join("远端副本.txt").display(),
+                a_root.join("回传.txt").display(),
+            ));
             get_sent = true;
         }
         if get_sent && peer == Peer::Creator && line.contains("[文件] 已接收并验证") {
@@ -138,7 +147,7 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
     enter(&mut b, "quit");
     assert!(a.wait().unwrap().success());
     assert!(b.wait().unwrap().success());
-    assert_eq!(fs::read(b_root.join("收到.txt")).unwrap(), content.as_bytes());
+    assert_eq!(fs::read(base.join("远端副本.txt")).unwrap(), content.as_bytes());
     assert_eq!(fs::read(a_root.join("回传.txt")).unwrap(), content.as_bytes());
     fs::remove_dir_all(base).unwrap();
 }
