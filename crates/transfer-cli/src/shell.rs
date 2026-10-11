@@ -190,7 +190,7 @@ async fn put_path(
                         .await.map_err(|e| format!("{e:?}"))?;
                 } else {
                     let receipt = send_via_managed_sdk_cancellable(
-                        session, lanes, root, path, &relative_string(&remote)?, next_id(), Some(progress), cancels
+                        session, lanes, root, (path, &relative_string(&remote)?), next_id(), Some(progress), cancels
                     ).await.map_err(|e| format!("{e:?}"))?;
                     println!("[PUT] {}: {} 字节已校验提交", remote.display(), receipt.bytes);
                 }
@@ -199,7 +199,7 @@ async fn put_path(
         }
         None => {
             let receipt = send_via_managed_sdk_cancellable(
-                session, lanes, root, source, &relative_string(destination)?, next_id(), Some(progress), cancels
+                session, lanes, root, (source, &relative_string(destination)?), next_id(), Some(progress), cancels
             ).await.map_err(|e| format!("{e:?}"))?;
             println!("[PUT] {} 字节已由接收端校验并提交", receipt.bytes);
             Ok(())
@@ -504,7 +504,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             // never passes file bytes on Control QUIC.
                             let auth = if is_creator { Some((&arbiter, &remote_grant)) } else { None };
                             match serve_control_stream_cancellable(
-                                &session, &root, send, recv, auth, Some(&lanes), Some(&progress), Some(&cancels),
+                                &session, &root, (send, recv), auth, Some(&lanes), Some(&progress), Some(&cancels),
                             ).await {
                                 Ok(IncomingResult::Received(receipt)) => {
                                     println!("\n[文件] 已接收并验证 {} 字节（SHA-256 OK）", receipt.bytes);
