@@ -171,18 +171,18 @@ fn input_thread(
                     Err(_) => "quit".to_owned(),
                 }
             };
-            // Quit is terminal: do not wait for Ready and then open another
-            // raw-mode editor while the Tokio thread is closing QUIC.
-            let is_quit = matches!(line.trim().to_ascii_lowercase().as_str(),
-                "quit" | "exit" | "bye");
-            if tx.send(line).is_err() || is_quit || ready.recv().is_err() { break; }
+            // Shell decides whether quit is accepted. A busy transfer may
+            // reject quit and resume input instead of stranding this thread.
+            if tx.send(line).is_err() || ready.recv().is_err() { break; }
         }
     });
 }
 
-struct PromptReady(std::sync::mpsc::Sender<()>);
+struct PromptReady(std::sync::mpsc::Sender<()>, bool);
 impl Drop for PromptReady {
-    fn drop(&mut self) { let _ = self.0.send(()); }
+    fn drop(&mut self) {
+        if self.1 { let _ = self.0.send(()); }
+    }
 }
 
 
@@ -676,7 +676,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                 }
             }
             input = rx.recv() => {
-                let _prompt_guard = PromptReady(prompt_ready.clone());
+                let mut prompt_guard = PromptReady(prompt_ready.clone(), true);
                 let Some(line) = input else { return Ok(()); };
                 let args = match shell_words::split(&line) {
                     Ok(args) => args,
@@ -718,6 +718,9 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             worker.abort();
                             let _ = worker.await;
                         }
+                        // Accepted quit: closing the Ready sender wakes the
+                        // input thread without opening one more terminal prompt.
+                        prompt_guard.1 = false;
                         return Ok(());
                     }
                     "help" | "?" => help(),
