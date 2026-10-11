@@ -1036,7 +1036,10 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                                 Ok(()) => println!("\n[GET] 文件或目录任务全部校验提交"),
                                 Err(err) if cancellation_flag.load(Ordering::SeqCst) =>
                                     println!("[GET] 已取消：{err}"),
-                                Err(err) => eprintln!("[GET] 失败：{err}"),
+                                Err(err) => {
+                                    eprintln!("[GET] 失败：{err}");
+                                    eprintln!("[GET] 本次文件未确认完整接收并通过校验，请检查接收端空间/权限后重试");
+                                },
                             }
                             activity.store(false, Ordering::SeqCst);
                         }));
