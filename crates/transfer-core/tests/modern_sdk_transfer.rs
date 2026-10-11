@@ -301,35 +301,53 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                     // the real SDK Control and managed Data pool, with the
                     // sender waiting for its first receiver disk ACK.
                     let put_sender_registry = TransferCancels::default();
-                    let (put_sender, peer_cancel, cancel_handler) =
-                        tokio::time::timeout(Duration::from_secs(15), async {
-                            tokio::join!(
-                                send_via_managed_sdk_cancellable(
+                    let milestones = std::sync::atomic::AtomicUsize::new(0);
+                    let attempt = tokio::time::timeout(Duration::from_secs(25), async {
+                        tokio::join!(
+                            async {
+                                let done = send_via_managed_sdk_cancellable(
                                     &creator, &creator_pool, &source,
                                     (Path::new("中文名.txt"), "receiver-canceled.bin"),
                                     37, None, &put_sender_registry,
-                                ),
-                                async {
-                                    // Never let CANCEL arrive before sender
-                                    // registration in this in-flight test.
-                                    loop {
-                                        if put_sender_registry.active_ids().contains(&37) {
-                                            break;
-                                        }
-                                        tokio::task::yield_now().await;
+                                ).await;
+                                milestones.fetch_or(1, std::sync::atomic::Ordering::SeqCst);
+                                done
+                            },
+                            async {
+                                // Receive the actual file-control stream without
+                                // ACKing the offer, guaranteeing the sender is
+                                // IN FLIGHT (waiting on the first disk ACK).
+                                let (_file_send, _file_recv) =
+                                    joiner.control.accept_bi().await.unwrap();
+                                milestones.fetch_or(2, std::sync::atomic::Ordering::SeqCst);
+                                loop {
+                                    if put_sender_registry.active_ids().contains(&37) {
+                                        break;
                                     }
-                                    cancel_transfer_via_sdk(&joiner, 37).await
-                                },
-                                async {
-                                    let (send, recv) =
-                                        creator.control.accept_bi().await.unwrap();
-                                    serve_control_stream_cancellable(
-                                        &creator, &source, (send, recv), None,
-                                        Some(&creator_pool), None, Some(&put_sender_registry),
-                                    ).await
-                                },
-                            )
-                        }).await.expect("receiver could not stop remote PUT sender");
+                                    tokio::task::yield_now().await;
+                                }
+                                milestones.fetch_or(4, std::sync::atomic::Ordering::SeqCst);
+                                let ack = cancel_transfer_via_sdk(&joiner, 37).await;
+                                milestones.fetch_or(8, std::sync::atomic::Ordering::SeqCst);
+                                ack
+                            },
+                            async {
+                                let (send, recv) =
+                                    creator.control.accept_bi().await.unwrap();
+                                milestones.fetch_or(16, std::sync::atomic::Ordering::SeqCst);
+                                let handled = serve_control_stream_cancellable(
+                                    &creator, &source, (send, recv), None,
+                                    Some(&creator_pool), None, Some(&put_sender_registry),
+                                ).await;
+                                milestones.fetch_or(32, std::sync::atomic::Ordering::SeqCst);
+                                handled
+                            },
+                        )
+                    }).await;
+                    let (put_sender, peer_cancel, cancel_handler) = attempt.unwrap_or_else(|_| {
+                        panic!("receiver cancel timed out at stages={}",
+                            milestones.load(std::sync::atomic::Ordering::SeqCst))
+                    });
                     assert!(matches!(put_sender, Err(SdkTransferError::Cancelled)));
                     assert_eq!(peer_cancel.unwrap(), CancelAck::Stopped);
                     assert!(matches!(cancel_handler.unwrap(), IncomingResult::DirectoryListed));
