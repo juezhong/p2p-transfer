@@ -17,7 +17,7 @@ use tokio::{sync::{mpsc, oneshot, Mutex}, task::JoinHandle};
 use rustyline::{Editor, error::ReadlineError, history::DefaultHistory};
 use transfer_core::{
     cancel::TransferCancels,
-    checksum::{hash_reader, HashAlgorithm},
+    checksum::{hash_reader, hash_reader_both, HashAlgorithm},
     lease::TransferLease,
     progress::{TransferProgress, ProgressSnapshot},
     recursive::{gather_directory, ManifestEntry},
@@ -107,7 +107,8 @@ pub(crate) fn relative_string(path: &Path) -> CliResult<String> {
 
 fn introduction() {
     println!("远端：pwd / ls / cd    本地：lpwd / lls / lcd");
-    println!("传输：put / get / cancel    会话：status / help / quit / exit");
+    println!("传输：put / get / cancel    校验：checksum / sha256 / md5");
+    println!("会话：status / help / quit / exit");
     println!("Tab 可补全命令及路径；仅发起 put/get 的设备可取消任务。");
 }
 
@@ -128,6 +129,7 @@ fn help() {
     println!("  本机文件校验");
     println!("    sha256 <本机文件>    计算本地文件 SHA-256");
     println!("    md5 <本机文件>       计算本地文件 MD5（仅用于比对）");
+    println!("    checksum <本机文件>  一次读取，输出 SHA-256 和 MD5");
     println!("  会话与编辑");
     println!("    status                显示连接和任务状态");
     println!("    help                  显示本帮助");
@@ -688,7 +690,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                 if args.is_empty() { continue; }
                 let cmd = args[0].to_lowercase();
                 if (disconnected || session.control().close_reason().is_some())
-                    && !matches!(cmd.as_str(), "quit" | "exit" | "bye" | "sha256" | "md5") {
+                    && !matches!(cmd.as_str(), "quit" | "exit" | "bye" | "sha256" | "md5" | "checksum") {
                     println!("[连接] 对端已经断开；任何操作都无法继续，请输入 quit 退出。");
                     continue;
                 }
@@ -862,6 +864,31 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             }
                             Err(err) => println!("[CD] {err:?}"),
                         }
+                    }
+                    "checksum" if args.len() == 2 => {
+                        let path = match scoped_path(root.display_root(), &local_cwd, &args[1]) {
+                            Ok(path) => path,
+                            Err(err) => { eprintln!("[校验] 路径错误：{err}"); continue; }
+                        };
+                        let file = match root.open_read(&path) {
+                            Ok(file) => file,
+                            Err(err) => {
+                                eprintln!("[校验] 无法读取本机文件：{err:?}");
+                                continue;
+                            }
+                        };
+                        let display_path = display_absolute(root.display_root(), &path);
+                        // 摘要只读取已打开的本机文件，在阻塞线程执行，不阻塞网络任务。
+                        tokio::spawn(async move {
+                            match tokio::task::spawn_blocking(move || hash_reader_both(file)).await {
+                                Ok(Ok((sha, md5))) => {
+                                    println!("SHA256  {sha}  {display_path}");
+                                    println!("MD5     {md5}  {display_path}");
+                                }
+                                Ok(Err(err)) => eprintln!("[校验] 文件读取失败：{err}"),
+                                Err(err) => eprintln!("[校验] 计算任务失败：{err}"),
+                            }
+                        });
                     }
                     "sha256" | "md5" if args.len() == 2 => {
                         let path = match scoped_path(root.display_root(), &local_cwd, &args[1]) {
