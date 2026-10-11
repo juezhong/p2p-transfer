@@ -332,18 +332,29 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                                 ack
                             },
                             async {
-                                let (send, recv) =
-                                    creator.control.accept_bi().await.unwrap();
-                                milestones.fetch_or(16, std::sync::atomic::Ordering::SeqCst);
-                                let handled = serve_control_stream_cancellable(
-                                    &creator, &source, (send, recv), None,
-                                    Some(&creator_pool), None, Some(&put_sender_registry),
-                                ).await;
-                                eprintln!("receiver-cancel server handled={handled:?} active={:?} finished={}",
-                                    put_sender_registry.active_ids(),
-                                    put_sender_registry.was_finished(37));
-                                milestones.fetch_or(32, std::sync::atomic::Ordering::SeqCst);
-                                handled
+                                // A previous test's locally stopped
+                                // GET Control stream can remain in the inbound
+                                // accept queue. It has no live file request
+                                // and must not steal the one-shot listener
+                                // that should handle the new CANCEL RPC.
+                                loop {
+                                    let (send, recv) =
+                                        creator.control.accept_bi().await.unwrap();
+                                    milestones.fetch_or(16, std::sync::atomic::Ordering::SeqCst);
+                                    let handled = serve_control_stream_cancellable(
+                                        &creator, &source, (send, recv), None,
+                                        Some(&creator_pool), None, Some(&put_sender_registry),
+                                    ).await;
+                                    if matches!(&handled,
+                                        Err(SdkTransferError::Transfer(
+                                            transfer_core::stream_transfer::TransferError::Io(error)
+                                        )) if error.kind() == std::io::ErrorKind::ConnectionReset)
+                                    {
+                                        continue;
+                                    }
+                                    milestones.fetch_or(32, std::sync::atomic::Ordering::SeqCst);
+                                    break handled;
+                                }
                             },
                         )
                     }).await;
