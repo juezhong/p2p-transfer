@@ -565,7 +565,7 @@ pub async fn serve_control_stream_cancellable(
                         let mut data = read_data_preface(session, lanes, id).await?;
                         receive_file_after_offer_with_progress(
                             first, &mut control, &mut data, root, progress,
-                        ).await.map(|receipt| IncomingResult::Received(receipt))
+                        ).await.map(IncomingResult::Received)
                             .map_err(SdkTransferError::from)
                     } => received,
                 };
@@ -746,7 +746,7 @@ pub async fn serve_control_stream_cancellable(
                             () = canceled(rx) => Err(SdkTransferError::Cancelled),
                             sent = send_on_managed_lane(
                                 session, lanes, root, Path::new(&source), &destination, request_id, progress,
-                            ) => sent.map(IncomingResult::ServedGet).or_else(|err| {
+                            ) => sent.map(IncomingResult::ServedGet).map_err(|err| {
                                 // A peer may send STOP_SENDING(0) just before
                                 // its CANCEL RPC arrives on another Control stream.
                                 // A stopped file stream is a task cancellation,
@@ -754,8 +754,8 @@ pub async fn serve_control_stream_cancellable(
                                 if matches!(&err, SdkTransferError::Transfer(
                                     TransferError::Io(io_err)
                                 ) if io_err.kind() == io::ErrorKind::ConnectionReset) {
-                                    Err(SdkTransferError::Cancelled)
-                                } else { Err(err) }
+                                    SdkTransferError::Cancelled
+                                } else { err }
                             }),
                         };
                         if let Some(p) = progress { p.clear_request(request_id); }
