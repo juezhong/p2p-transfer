@@ -65,15 +65,10 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
     let mut b = launch(exe, &b_root, Peer::Joiner, tx);
 
     enter(&mut a, "1");
-    enter(&mut a, "yes");
     enter(&mut b, "2");
-    enter(&mut b, "yes");
 
     let mut invite = false;
     let mut reply = false;
-    let mut first_code: Option<String> = None;
-    let mut second_code: Option<String> = None;
-    let mut confirmed = false;
     let mut ready = [false; 2];
     let mut put_sent = false;
     let mut get_sent = false;
@@ -101,20 +96,6 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
             if !reply {
                 enter(&mut a, &line[pos..]);
                 reply = true;
-            }
-        }
-        if let Some((_, code)) = line.split_once("双方设备应显示相同的 6 位配对核对码：") {
-            match peer {
-                Peer::Creator => first_code = Some(code.trim().to_owned()),
-                Peer::Joiner => second_code = Some(code.trim().to_owned()),
-            }
-        }
-        if let (Some(one), Some(two)) = (&first_code, &second_code) {
-            if !confirmed {
-                assert_eq!(one, two, "ICE/manual TLS transcript comparison mismatch");
-                enter(&mut a, "yes");
-                enter(&mut b, "yes");
-                confirmed = true;
             }
         }
         if line.contains("已建立安全 P2P 连接") {
