@@ -133,7 +133,9 @@ fn redraw(screen: &mut Screen) {
 }
 
 pub fn progress(text: Option<String>) {
-    if !io::stdout().is_terminal() {
+    // Windows continues using rustyline rather than this Unix raw editor.
+    // Do not silently swallow its live progress when stdout is a TTY.
+    if !supported() {
         if let Some(line) = text { std::println!("{line}"); }
         return;
     }
