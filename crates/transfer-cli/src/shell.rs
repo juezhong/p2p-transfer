@@ -412,6 +412,7 @@ async fn cancel_current(
     pending: &PendingDownloads,
     progress: &TransferProgress,
     registry: &TransferCancels,
+    cancel_in_flight: &Arc<AtomicBool>,
 ) -> bool {
     let mut ids: Vec<u64> = registry.active_ids();
     for id in pending.lock().await.keys().copied() {
@@ -436,6 +437,8 @@ async fn cancel_current(
     progress.clear();
     crate::terminal::progress(None);
     if interrupted || batch_id.is_some() {
+        cancel_in_flight.store(true, Ordering::SeqCst);
+        let pending_flag = Arc::clone(cancel_in_flight);
         let peer = Arc::clone(session);
         tokio::spawn(async move {
             // Do not block the Control accept loop while waiting for the
@@ -457,6 +460,7 @@ async fn cancel_current(
                         release_transfer_via_sdk(peer.as_ref(), id)).await;
                 }
             }
+            pending_flag.store(false, Ordering::SeqCst);
         });
     }
     interrupted
@@ -482,6 +486,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let data_lanes = Arc::clone(&peer.data_lanes);
     let active = Arc::new(AtomicBool::new(false));
     let cancelling = Arc::new(AtomicBool::new(false));
+    let cancel_in_flight = Arc::new(AtomicBool::new(false));
     let arbiter = TransferLease::new();
     let remote_grant: RemoteLeaseGrant = Arc::new(Mutex::new(Default::default()));
     let is_creator = peer.role == "创建方";
@@ -745,7 +750,9 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         } else {
                             println!("  租约        空闲");
                         }
-                        println!("  传输任务    {}", if active.load(Ordering::SeqCst) ||
+                        println!("  传输任务    {}", if cancel_in_flight.load(Ordering::SeqCst) {
+                            "取消中（等待远端确认）"
+                        } else if active.load(Ordering::SeqCst) ||
                             !cancels.active_ids().is_empty() {
                             "进行中（任意一端可以 cancel 或 Ctrl-C）"
                         } else { "空闲" });
@@ -806,6 +813,10 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let suggested = source.file_name()
                             .ok_or("请输入有效的文件路径")?.to_string_lossy().to_string();
                         let remote = scoped_remote(remote_root.as_deref(), &remote_cwd, args.get(2).map(String::as_str).unwrap_or(&suggested))?;
+                        if cancel_in_flight.load(Ordering::SeqCst) {
+                            println!("[传输] 正在确认上一任务的双端取消，请稍后再启动");
+                            continue;
+                        }
                         if active.swap(true, Ordering::SeqCst) {
                             println!("[PUT] 当前已有文件任务");
                             continue;
@@ -842,6 +853,10 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let local = scoped_path(root.display_root(), &local_cwd, args.get(2).map(String::as_str).unwrap_or(&suggested))?;
                         let source = relative_string(&src)?;
                         let destination = relative_string(&local)?;
+                        if cancel_in_flight.load(Ordering::SeqCst) {
+                            println!("[传输] 正在确认上一任务的双端取消，请稍后再启动");
+                            continue;
+                        }
                         if active.swap(true, Ordering::SeqCst) {
                             println!("[GET] 当前已有文件任务");
                             continue;
@@ -877,6 +892,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let was_running = cancel_current(
                             &session, &mut task, &mut active_batch_id,
                             is_creator, &pending_downloads, &progress, &cancels,
+                            &cancel_in_flight,
                         ).await;
                         if was_running {
                             active.store(false, Ordering::SeqCst);
@@ -895,6 +911,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let stopped = cancel_current(
                             &session, &mut task, &mut active_batch_id,
                             is_creator, &pending_downloads, &progress, &cancels,
+                            &cancel_in_flight,
                         ).await;
                         active.store(false, Ordering::SeqCst);
                         if stopped {
