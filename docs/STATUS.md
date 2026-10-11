@@ -225,3 +225,10 @@
 - CLI 启动打印 `CARGO_PKG_VERSION`，远端 prompt 由 `p2p[remote:/]` 换成远端真实授权完整路径；status 重排为用户可读的 Control/ICE、Data、授权目录及传输任务分区；TTY 进度用 \r 覆盖刷新同一行，非TTY保留换行以兼容自动测试；帮助信息重新布局。
 - 本机操作和远端 RPC 均接受**位于各自授权共享根内**的绝对路径。允许用户显式设置 `P2P_TRANSFER_SHARE_ROOT=/`（Unix）并在启动时明确同意授权整台设备；默认共享仍仅为工作目录，不会悄悄突破 cap-std Directory 安全边界。Windows 跨磁盘根目录尚未实现。
 - 仍需：真实双机完成2GiB SHA、远端取消/恢复与全部四 Data lane 故障重试测试；全系统任意磁盘非授权访问仍受到保护。本 PR 不能在 CI 完成前合并。
+
+## 2026-10-11：应用户明确要求对齐 Go v0.16.4 的进程工作目录与全文件系统访问
+
+- 修正旧版误把启动目录作为远程文件访问沙盒边界的行为。新交互模式的 `SharedRoot::for_interactive_shell` 将 Unix 文件能力根设为 `/`（Windows 当前盘符根），以实际启动目录作为 local cwd；通过新的认证 `RpcRequest::StartDirectory` 单独查询对端初始 cwd，`RootInfo` 仍可查询可访问范围，二者不再混淆。
+- **无需 P2P_TRANSFER_SHARE_ROOT、无需启动共享目录 yes**。默认 `pwd/lpwd` 与提示符均从真实启动路径开始；`cd ..`、绝对路径 PUT/GET、lcd/ls 和远端目录访问跨越启动目录。普通 `SharedRoot::authorize` 原有有限目录能力仍保留给明确限制权限的库调用场景与测试，数据操作仍走 cap-std Dir 和操作系统权限，不信任远端无验证的系统路径。
+- **风险边界显著改变**：通过首次 INVITE/REPLY 配对的对端可读取或修改本机当前权限账户可访问的全系统文件；与用户指定的 Go 工作流一致，但务必避免 root 用户配对不可信设备，勿公开连接码。Windows 目前仅启动盘符，跨卷仍不具备 Unix 的全部范围。
+- 测试取消原有的两次目录 yes 和历史六位 SAS 等待，增加默认全系统范围下启动 cwd 与非启动目录外文件访问回归。新版 Release 仍是测试版，尚需 CI 和真实设备验收。
