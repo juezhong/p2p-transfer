@@ -267,3 +267,11 @@
 - Transfer 在 SDK 合并后才开始迁移，固定 `p2p-sdk@7b7873c`：Transfer 将 bootstrap 映射为 Control，把四条 application-requested managed links 解释为 Data（仍在会话连接完成后申请）；旧双连接回归适配 `first/second`。不改变业务请求帧与文件传输语义。
 - `checksum <本机文件>` 单次使用 128 KiB 缓冲流式计算 SHA-256 与 MD5，输出两行系统校验风格摘要；旧 `sha256/md5` 原命令保留。MD5 不得作为抗恶意修改的安全签名。
 - 本批只对 SDK 公共接口/资源生命周期做迁移；**真实 NAT、bootstrap 断线后附加链路恢复、长时会话、2GiB SHA 与跨版本互通仍须用户设备实测**。传输 stream 断开后的业务重传仍由 Transfer 负责。
+
+## 2026-10-11：冻结 v0.1.3 SDK/Transfer 基线，单独修复 CLI 交互
+
+- 已接受且不可回写的 Transfer 源码基线：`v0.1.3` -> `acdfea134cebe28683151f7e859b6eccefa6c6e4`，与 SDK `7b7873c46c9f66f8eedef28b7cd7e53c97ba32e4` 配套。通过两个独立的标签 `transfer-v0.1.3-accepted-baseline` 与 `transfer-v0.1.3-sdk-baseline` 保留精确提交；标签指向原始源码而非本次 CLI 调整。
+- 本次只改 CLI `shell.rs` 与终端显示，不修改 SDK、传输协议、文件收发核心或版本 `0.1.3`。在已有传输任务时，`checksum`/`sha256`/`md5` 排队等待完成，避免同一 2 GiB 文件边发送边重复计算摘要；命令期间仅阻塞提示符，不阻塞 Control/Data 事件循环，并显示开始、等待、完成。
+- 针对用户日志中发送端 `RemoteRejected`、接收端 `Filesystem(Io)`：当前仅可确认接收侧文件操作失败，发送端收到拒绝。不能无证据归咎于校验计算；通过禁止重叠文件 I/O 避免一种可控的资源争用，同时明确提示本次传输未通过写盘/SHA 确认。
+- 文本终端进度改为稳定单行 10 格进度条、百分比、已传/总量、速率、预计剩余时间、文件路径；保持原单个 TTY 输出锁与原始终端恢复行为，避免更换 TUI 框架带来的稳定性风险。
+- 仍需要实体 Linux x86_64 ↔ RK3568 对 2 GiB GET、传输中请求校验、接收端空间不足和恢复后的状态进行验证；不能把减轻 I/O 竞争等同于诊断解决所有 `Filesystem(Io)`。
