@@ -21,8 +21,6 @@ use crate::{debug_error, now_secs, prompt, CliResult};
 pub struct ActivePeer {
     pub session: Arc<ConnectedTransportPeer>,
     pub data_lanes: Arc<ModernDataLanes>,
-    pub peer_address: SocketAddr,
-    pub local_address: SocketAddr,
     pub role: &'static str,
 }
 
@@ -128,7 +126,7 @@ fn connected_peer(
         if diagnostic.control_outbound { "outbound" } else { "inbound" },
         data_lanes.desired());
     Ok(ActivePeer {
-        session, data_lanes, peer_address, local_address, role,
+        session, data_lanes, role,
     })
 }
 
