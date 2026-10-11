@@ -10,6 +10,9 @@ pub mod access;
 
 pub mod secure_io;
 
+/// 本机文件摘要，不依赖 SDK 网络协议。
+pub mod checksum;
+
 pub mod stream_transfer;
 
 pub mod sdk_quic;
