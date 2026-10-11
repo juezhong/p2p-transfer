@@ -59,7 +59,23 @@ pub(crate) fn scoped_path(root: &Path, cwd: &Path, input: &str) -> CliResult<Pat
     let path = Path::new(input);
     if input == "/" { return Ok(PathBuf::new()); }
     if path.is_absolute() {
-        let stripped = path.strip_prefix(root)
+        // Windows canonicalize() often returns verbatim volume paths
+        // (\\\\?\\C:\\...), while std::env::temp_dir(), pasted commands
+        // and CLI arguments normally use DOS spelling (C:\\...).
+        // Both forms refer to the SAME volume. Strip using Path component
+        // boundaries rather than string prefix matching; still reject other
+        // drives and normalize parent navigation below.
+        #[cfg(windows)]
+        let ordinary_root = root.to_str()
+            .and_then(|text| text.strip_prefix(r"\\?\"))
+            .map(Path::new);
+        #[cfg(windows)]
+        let stripped = path.strip_prefix(root).or_else(|_| {
+            path.strip_prefix(ordinary_root.unwrap_or(root))
+        });
+        #[cfg(not(windows))]
+        let stripped = path.strip_prefix(root);
+        let stripped = stripped
             .map_err(|_| format!("绝对路径不在本次授权目录 {} 下", root.display()))?;
         return root_relative(Path::new(""), &stripped.to_string_lossy());
     }
