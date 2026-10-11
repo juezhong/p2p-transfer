@@ -1,6 +1,6 @@
 [package]
 name = "transfer-cli"
-version = "0.1.0-test.6"
+version = "0.1.0-test.7"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -19,3 +19,7 @@ rcgen.workspace = true
 rustls.workspace = true
 shell-words = "1.1"
 rustyline = "15.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+unicode-width = "0.2"

@@ -11,7 +11,7 @@ use transfer_core::{
     cancel::{TransferCancels, canceled},
     progress::TransferProgress,
     sdk_quic::{list_via_sdk, root_info_via_sdk, starting_directory_via_sdk,
-        cancel_transfer_via_sdk,
+        cancel_transfer_via_sdk, CancelAck,
         serve_control_stream, serve_control_stream_cancellable, request_get_via_sdk,
         SdkTransferError, send_via_managed_sdk_with_progress,
         serve_control_stream_with_lease, ControlIo, IncomingResult},
@@ -250,7 +250,7 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                             ).await
                         },
                     );
-                    ack.unwrap();
+                    assert_eq!(ack.unwrap(), CancelAck::Pending);
                     assert!(matches!(served.unwrap(), IncomingResult::DirectoryListed));
                     let (_guard, rx) = cancellations.register(23).unwrap();
                     tokio::time::timeout(Duration::from_secs(1), canceled(rx)).await.unwrap();
@@ -267,7 +267,10 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                                         &creator, "empty.bin".into(),
                                         "should-never-complete.bin".into(), 26,
                                     ).await.unwrap();
-                                    cancel_transfer_via_sdk(&creator, 26).await.unwrap();
+                                    assert_eq!(
+                                        cancel_transfer_via_sdk(&creator, 26).await.unwrap(),
+                                        CancelAck::Stopped,
+                                    );
                                 },
                                 async {
                                     let (send, recv) =

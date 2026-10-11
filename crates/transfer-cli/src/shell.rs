@@ -8,7 +8,6 @@ use std::{
     future::Future,
     collections::{HashMap, VecDeque},
     path::{Component, Path, PathBuf},
-    io::{self, Write, IsTerminal},
     time::Duration,
     sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc, Mutex as StdMutex},
     thread,
@@ -22,13 +21,23 @@ use transfer_core::{
     progress::{TransferProgress, ProgressSnapshot},
     recursive::{gather_directory, ManifestEntry},
     rpc::list_in_root,
-    sdk_quic::{acquire_transfer_via_sdk, release_transfer_via_sdk, list_typed_via_sdk, list_via_sdk, root_info_via_sdk, starting_directory_via_sdk, mkdir_via_sdk, request_get_via_sdk, cancel_transfer_via_sdk, send_via_managed_sdk_cancellable, serve_control_stream_cancellable, IncomingResult, RemoteLeaseGrant},
+    sdk_quic::{acquire_transfer_via_sdk, release_transfer_via_sdk, list_typed_via_sdk, list_via_sdk, root_info_via_sdk, starting_directory_via_sdk, mkdir_via_sdk, request_get_via_sdk, cancel_transfer_via_sdk, CancelAck, send_via_managed_sdk_cancellable, serve_control_stream_cancellable, IncomingResult, RemoteLeaseGrant},
     secure_io::SharedRoot,
 };
 
 use crate::{completion::{self, CompletionQuery, ShellCompleter}, interactive::ActivePeer, CliResult};
 use transfer_core::modern_data_lanes::ModernDataLanes;
 use transfer_core::sdk_quic::AuthenticatedSession;
+
+// All task notices and live status are serialized with the input editor.
+macro_rules! println {
+    () => { crate::terminal::log(String::new()) };
+    ($($arg:tt)*) => { crate::terminal::log(format!($($arg)*)) };
+}
+macro_rules! eprintln {
+    ($($arg:tt)*) => { crate::terminal::error(format!($($arg)*)) };
+}
+
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
@@ -95,19 +104,33 @@ pub(crate) fn relative_string(path: &Path) -> CliResult<String> {
     path.to_str().map(str::to_owned).ok_or_else(|| "当前协议不支持非 UTF-8 路径".into())
 }
 
+fn introduction() {
+    println!("远端：pwd / ls / cd    本地：lpwd / lls / lcd");
+    println!("传输：put / get / cancel    会话：status / help / quit");
+    println!("Tab 可补全命令及路径；Ctrl-C 可取消当前任务。");
+}
+
 fn help() {
-    println!("───── P2P Transfer 文件命令 ─────");
-    println!("  pwd / ls [目录] / cd <目录|->    远端目录操作");
-    println!("  lpwd / lls [目录] / lcd <目录|-> 本机目录操作");
-    println!("  put <本机> [远端]                上传文件/目录");
-    println!("  get <远端> [本机]                下载文件/目录");
-    println!("  status                         Control、Data 及任务状态");
-    println!("  cancel / Ctrl-C                双端取消传输，不断开连接");
-    println!("  quit / exit                    关闭会话并退出");
-    println!("────────────────────────────────");
-    println!("路径可用中文/空格（用双引号）和 Tab 补全。");
-    println!("绝对路径按本机系统文件权限访问；Unix 可通过 cd .. 走出启动目录。");
-    println!("PUT/GET 占用前台直到结束；不支持断点续传。");
+    println!("════════════════ P2P Transfer 命令帮助 ════════════════");
+    println!("  远端目录");
+    println!("    pwd                   显示远端完整路径");
+    println!("    ls [路径]             列出远端文件/目录");
+    println!("    cd <路径|->           进入远端目录 / 返回上一次");
+    println!("  本机目录");
+    println!("    lpwd                  显示本地完整路径");
+    println!("    lls [路径]            列出本地文件/目录");
+    println!("    lcd <路径|->          进入本地目录 / 返回上一次");
+    println!("  文件传输");
+    println!("    put <本机> [远端]     上传文件或整个目录");
+    println!("    get <远端> [本机]     下载文件或整个目录");
+    println!("    cancel / Ctrl-C       双端取消当前任务，不断开");
+    println!("  会话与编辑");
+    println!("    status                显示连接和任务状态");
+    println!("    help                  显示本帮助");
+    println!("    quit / exit           断开并退出");
+    println!("    Tab / ↑↓              补全路径 / 浏览历史");
+    println!("════════════════════════════════════════════════════");
+    println!("支持绝对路径、中文文件名；含空格的路径使用双引号。");
 }
 
 /// The next prompt is displayed only after the current command was printed.
@@ -121,12 +144,17 @@ fn input_thread(
     thread::spawn(move || {
         let mut editor = Editor::<ShellCompleter, DefaultHistory>::new().ok();
         if let Some(line_editor) = editor.as_mut() {
-            line_editor.set_helper(Some(ShellCompleter { requests: completions }));
+            line_editor.set_helper(Some(ShellCompleter { requests: completions.clone() }));
         }
         loop {
             let label = prompt_label.lock().map(|p| p.clone())
                 .unwrap_or_else(|_| "p2p> ".to_owned());
-            let line = if let Some(line_editor) = editor.as_mut() {
+            let line = if crate::terminal::supported() {
+                match crate::terminal::read_line(&label, &completions) {
+                    Ok(line) => line,
+                    Err(_) => "quit".to_owned(),
+                }
+            } else if let Some(line_editor) = editor.as_mut() {
                 match line_editor.readline(&label) {
                     Ok(line) => {
                         if !line.trim().is_empty() {
@@ -334,6 +362,23 @@ where
     result
 }
 
+fn describe_link(peer: &ActivePeer) -> &'static str {
+    let d = peer.session.diagnostic();
+    let candidate = format!("{:?}", d.remote_candidate_kind).to_ascii_lowercase();
+    if d.actual_remote_udp.is_ipv6() { return "IPv6 直连"; }
+    if candidate.contains("portmap") { return "IPv4 端口映射直连"; }
+    if candidate.contains("srflx") || candidate.contains("prflx")
+        || candidate.contains("reflexive")
+    { return "IPv4 NAT 打洞"; }
+    if candidate.contains("host") {
+        match d.actual_remote_udp.ip() {
+            std::net::IpAddr::V4(ip) if ip.is_private() || ip.is_link_local() =>
+                "IPv4 局域网直连",
+            _ => "IPv4 Host 直连",
+        }
+    } else { "IPv4 ICE 直连" }
+}
+
 fn print_progress(p: &ProgressSnapshot) {
     let rate = p.bytes_per_second() / (1024.0 * 1024.0);
     let eta = p.eta().map(|d| format!("{}s", d.as_secs()))
@@ -344,12 +389,7 @@ fn print_progress(p: &ProgressSnapshot) {
         p.written / 1_048_576, p.total / 1_048_576,
         rate, p.elapsed.as_secs(), eta,
     );
-    if io::stdout().is_terminal() {
-        print!("\r\x1b[2K{msg}");
-        let _ = io::stdout().flush();
-    } else {
-        println!("{msg}");
-    }
+    crate::terminal::progress(Some(msg));
 }
 
 async fn cancel_current(
@@ -379,8 +419,11 @@ async fn cancel_current(
         match tokio::time::timeout(Duration::from_secs(5),
             cancel_transfer_via_sdk(session, id)).await
         {
-            Ok(Ok(())) => println!("\n[CANCEL] 对端已确认停止文件任务 {id}"),
-            _ => eprintln!("\n[CANCEL] 对端取消确认超时或失败（任务 {id}）"),
+            Ok(Ok(CancelAck::Stopped)) =>
+                println!("\n[CANCEL] 对端文件任务 {id} 已停止"),
+            Ok(Ok(CancelAck::Pending)) =>
+                println!("\n[CANCEL] 对端已记录取消请求 {id}，尚未发现活动发送任务"),
+            _ => eprintln!("\n[CANCEL] 对端任务停止确认超时或失败（任务 {id}）"),
         }
     }
     if let Some(id) = batch.take() {
@@ -390,6 +433,7 @@ async fn cancel_current(
         }
     }
     progress.clear();
+                crate::terminal::progress(None);
     interrupted
 }
 
@@ -403,6 +447,7 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     drop(lanes);
     drop(peer);
     if let Ok(owned) = Arc::try_unwrap(session) { owned.shutdown().await; }
+    crate::terminal::progress(None);
     result
 }
 
@@ -418,7 +463,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let (prompt_ready, ready_rx) = std::sync::mpsc::channel();
     let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
     let prompt_label = Arc::new(StdMutex::new("远端路径同步中> ".to_owned()));
-    help();
+    introduction();
     // Defer the first input prompt until the peer's real startup directory
     // has been resolved over authenticated Control RPC. Otherwise a fast
     // typist could accidentally run "ls" against "/" before synchronization.
@@ -430,7 +475,6 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let mut previous_remote = PathBuf::new();
     let mut task: Option<JoinHandle<()>> = None;
     let mut active_batch_id: Option<u64> = None;
-    let mut pending_prompt: Option<PromptReady> = None;
     let progress = Arc::new(TransferProgress::default());
     let cancels = Arc::new(TransferCancels::default());
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -439,6 +483,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let mut remote_root: Option<String> = None;
     let (root_tx, mut root_rx) = mpsc::unbounded_channel::<(String, String)>();
     let mut root_fetch_finished = false;
+    let link_mode = describe_link(peer);
     let session_for_root = Arc::clone(&session);
     tokio::spawn(async move {
         // Both peers enter their Control accept loop before this resolves.
@@ -470,7 +515,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         remote_cwd = relative;
                         println!("\n[目录] 对端初始目录：{initial}");
                         if let Ok(mut prompt) = prompt_label.lock() {
-                            *prompt = format!("{}> ", display_absolute(Path::new(&scope), &remote_cwd));
+                            *prompt = format!("[{}] {}> ", link_mode, display_absolute(Path::new(&scope), &remote_cwd));
                         }
                         remote_root = Some(scope);
                     } else {
@@ -506,8 +551,8 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                 }
                 active.store(false, Ordering::SeqCst);
                 progress.clear();
+                crate::terminal::progress(None);
                 active_batch_id = None;
-                pending_prompt.take();
                 println!("\n[连接] 对端已断开；本次会话不能继续传输，请输入 quit 退出。");
             }
             completed = incoming_workers.join_next(), if !incoming_workers.is_empty() => {
@@ -516,15 +561,19 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                 }
             }
             _ = tick.tick() => {
-                if let Some(snapshot) = progress.snapshot() { print_progress(&snapshot); }
+                if let Some(snapshot) = progress.snapshot() {
+                    print_progress(&snapshot);
+                } else {
+                    crate::terminal::progress(None);
+                }
                 if task.as_ref().is_some_and(JoinHandle::is_finished) {
                     if let Some(done) = task.take() {
                         if let Err(err) = done.await { eprintln!("[任务] 已中止：{err}"); }
                     }
                     progress.clear();
+                crate::terminal::progress(None);
                     active_batch_id = None;
                     active.store(false, Ordering::SeqCst);
-                    pending_prompt.take();
                 }
             }
             incoming = session.control().accept_bi(), if !disconnected => {
@@ -558,6 +607,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                                 Ok(IncomingResult::DirectoryListed) => {}
                                 Err(transfer_core::sdk_quic::SdkTransferError::Cancelled) => {
                                     progress.clear();
+                crate::terminal::progress(None);
                                     println!("\n[CANCEL] 该文件任务已由一端取消，Data 流已停止");
                                 },
                                 Err(err) => {
@@ -575,14 +625,14 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             let _ = worker.await;
                         }
                         progress.clear();
+                crate::terminal::progress(None);
                         active.store(false, Ordering::SeqCst);
-                        pending_prompt.take();
                         println!("\n[连接] 对端已断开；输入 quit 退出。");
                     },
                 }
             }
             input = rx.recv() => {
-                let mut prompt_guard = Some(PromptReady(prompt_ready.clone()));
+                let _prompt_guard = PromptReady(prompt_ready.clone());
                 let Some(line) = input else { return Ok(()); };
                 let args = match shell_words::split(&line) {
                     Ok(args) => args,
@@ -619,6 +669,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             ).await { remote_root = Some(path); }
                         }
                         println!("\n══════════ 会话状态 ══════════");
+                        println!("  连接方式    {}（无服务器中继）", link_mode);
                         println!("  设备角色    {}", peer.role);
                         println!("  Control     {} / {}",
                             if session.control().close_reason().is_none() {
@@ -636,14 +687,19 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         println!("  认证 prflx  {:?}", d.authenticated_peer_reflexive);
                         println!("────────── Data QUIC ({connected}/{}) ──────────", lanes.len());
                         for lane in lanes {
-                            println!("  #{} {:?}  代次 {}  ID {:?}",
-                                lane.index, lane.phase, lane.generation, lane.connection_id);
-                            println!("      本机IP {:?}  对端UDP {:?}  错误 {:?}",
-                                lane.local_ip, lane.remote_udp, lane.last_error);
+                            let state = if matches!(lane.phase,
+                                p2p_sdk::transport_session::ManagedLinkPhase::Connected) {
+                                "已连接"
+                            } else { "重连中/不可用" };
+                            println!("  链路 #{}    {}", lane.index, state);
+                            if state != "已连接" {
+                                println!("      代次 {}；错误 {}", lane.generation,
+                                    lane.last_error.as_deref().unwrap_or("未知"));
+                            }
                         }
                         println!("────────── 已授权目录 ──────────");
-                        println!("  本机共享根  {}", root.display_root().display());
-                        println!("  对端共享根  {}", remote_root.as_deref().unwrap_or("尚未取得"));
+                        println!("  本机可访问  {}", root.display_root().display());
+                        println!("  对端可访问  {}", remote_root.as_deref().unwrap_or("尚未取得"));
                         println!("  本机当前    {}", display_absolute(root.display_root(), &local_cwd));
                         println!("  对端当前    {}", display_absolute(
                             Path::new(remote_root.as_deref().unwrap_or("")), &remote_cwd
@@ -662,8 +718,10 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         } else { "空闲" });
                         if let Some(snapshot) = progress.snapshot() {
                             println!("  文件 ID     {}", snapshot.request_id);
-                            print_progress(&snapshot);
-                            if io::stdout().is_terminal() { println!(); }
+                            println!("  文件        {} {:.1}% · {}/{} MiB · {:.1} MiB/s",
+                                snapshot.file, snapshot.percent(),
+                                snapshot.written / 1_048_576, snapshot.total / 1_048_576,
+                                snapshot.bytes_per_second() / 1_048_576.0);
                         } else {
                             println!("  文件        无进行中进度");
                         }
@@ -702,7 +760,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             Ok(_) => {
                                 previous_remote = std::mem::replace(&mut remote_cwd, path);
                                 if let Ok(mut prompt) = prompt_label.lock() {
-                                    *prompt = format!("{}> ", display_absolute(
+                                    *prompt = format!("[{}] {}> ", link_mode, display_absolute(
                                             Path::new(remote_root.as_deref().unwrap_or("")), &remote_cwd
                                         ));
                                 }
@@ -727,6 +785,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let progress = Arc::clone(&progress);
                         let cancels = Arc::clone(&cancels);
                         progress.clear();
+                crate::terminal::progress(None);
                         let batch_id = next_id();
                         active_batch_id = Some(batch_id);
                         task = Some(tokio::spawn(async move {
@@ -738,7 +797,6 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             }
                             activity.store(false, Ordering::SeqCst);
                         }));
-                        pending_prompt = prompt_guard.take();
                     }
                     "get" if (2..=3).contains(&args.len()) => {
                         let src = scoped_remote(remote_root.as_deref(), &remote_cwd, &args[1])?;
@@ -759,6 +817,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let lease = arbiter.clone();
                         let progress = Arc::clone(&progress);
                         progress.clear();
+                crate::terminal::progress(None);
                         let batch_id = next_id();
                         active_batch_id = Some(batch_id);
                         task = Some(tokio::spawn(async move {
@@ -771,7 +830,6 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             }
                             activity.store(false, Ordering::SeqCst);
                         }));
-                        pending_prompt = prompt_guard.take();
                     }
                     "cancel" if args.len() == 1 => {
                         let was_running = cancel_current(
@@ -780,8 +838,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         ).await;
                         if was_running {
                             active.store(false, Ordering::SeqCst);
-                            pending_prompt.take();
-                            println!("[CANCEL] 双端任务已取消，会话保持连接");
+                            println!("[CANCEL] 取消流程已结束，会话保持连接");
                         } else {
                             println!("[CANCEL] 当前没有活动的文件任务");
                         }
@@ -797,9 +854,8 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             is_creator, &pending_downloads, &progress, &cancels,
                         ).await;
                         active.store(false, Ordering::SeqCst);
-                        pending_prompt.take();
                         if stopped {
-                            println!("\n[CANCEL] 双端文件任务已经取消，会话继续保持");
+                            println!("\n[CANCEL] 取消流程已结束，会话继续保持");
                         } else {
                             println!("\n[CANCEL] 当前没有正在进行的传输，输入 quit 可退出");
                         }
