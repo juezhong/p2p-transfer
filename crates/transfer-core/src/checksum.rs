@@ -75,7 +75,7 @@ mod tests {
         struct Broken;
         impl Read for Broken {
             fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-                Err(io::Error::new(io::ErrorKind::Other, "read failed"))
+                Err(io::Error::other("read failed"))
             }
         }
         assert!(hash_reader(Broken, HashAlgorithm::Sha256).is_err());
