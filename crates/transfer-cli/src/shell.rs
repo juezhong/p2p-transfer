@@ -405,7 +405,10 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
     let prompt_label = Arc::new(StdMutex::new("远端路径同步中> ".to_owned()));
     help();
-    input_thread(tx, ready_rx, completion_tx, Arc::clone(&prompt_label));
+    // Defer the first input prompt until the peer's real startup directory
+    // has been resolved over authenticated Control RPC. Otherwise a fast
+    // typist could accidentally run "ls" against "/" before synchronization.
+    let mut initial_input = Some((tx, ready_rx, completion_tx));
     let mut local_cwd = root.starting_relative()
         .map_err(|err| format!("初始目录不在本机访问范围内：{err:?}"))?;
     let mut remote_cwd = PathBuf::new();
@@ -461,6 +464,9 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                     }
                 } else {
                     eprintln!("[目录] 无法取得对端初始工作目录；请确认双方使用兼容版本");
+                }
+                if let Some((sender, ready, queries)) = initial_input.take() {
+                    input_thread(sender, ready, queries, Arc::clone(&prompt_label));
                 }
             }
             query = completion_rx.recv() => {
