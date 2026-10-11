@@ -20,13 +20,13 @@ chmod +x p2p-transfer-linux-aarch64-musl
 
 静态 musl 不保证兼容任何内核，仍需在目标板实测。**不要替换板上 glibc**。
 
-当前 `help/status`、远程 `pwd/ls/cd`、本地 `lpwd/lls/lcd`、递归 `put/get` 有实现；**Tab 本地/远程补全与 Go v0.16.4 传输可靠性模型尚未全量实现**，不能把当前测试预览当作完整对等版。
+当前 `help/status`、远程 `pwd/ls/cd`、本地 `lpwd/lls/lcd`、递归 `put/get` 以及本机 `sha256/md5` 校验命令有实现；**Tab 本地/远程补全与 Go v0.16.4 传输可靠性模型尚未全量实现**，不能把当前测试预览当作完整对等版。
 
 ## 网络结构和状态
 
 SDK 负责 ICE/STUN、手动配对、双方设备证书 mTLS、独立 Control QUIC / Data QUIC；Transfer 负责文件/目录命令、4MiB 有界应用确认窗口、.part/SHA-256、权限与 UI。控制消息不会走数据载荷通道，也不提供 TURN/文件中继。
 
-**稳定版本：** [v0.1.1](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.1)（修复任务发起方取消权限、双端任务状态与退出行为）；[v0.1.0](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.0) 为首个稳定 CLI。后续从 `main` 开发，不再发布 `v0.1.0-test.N`。稳定 CLI 尚不等于所有网络环境下的完整 Go 功能对等；仍无 TURN/Relay，断线未确认数据块的自动重传、四 Data lane 并行 striping、完整 2GiB SHA 验收和跨 NAT/CGNAT 手工验收仍需补充；TUI/GUI 未正式交付。
+**稳定版本：** [v0.1.2](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.2) 新增本机 `sha256 <文件>` / `md5 <文件>`、删除 GET 发送端冗余日志；[v0.1.1](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.1)（修复任务发起方取消权限、双端任务状态与退出行为）；[v0.1.0](https://github.com/juezhong/p2p-transfer/releases/tag/v0.1.0) 为首个稳定 CLI。后续从 `main` 开发，不再发布 `v0.1.0-test.N`。稳定 CLI 尚不等于所有网络环境下的完整 Go 功能对等；仍无 TURN/Relay，断线未确认数据块的自动重传、四 Data lane 并行 striping、完整 2GiB SHA 验收和跨 NAT/CGNAT 手工验收仍需补充；TUI/GUI 未正式交付。
 
 - [当前功能状态与下一步](docs/STATUS.md)
 - [稳定版本规划与自动发布流程](docs/RELEASE_PROCESS.md)
