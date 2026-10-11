@@ -14,6 +14,7 @@ use transfer_core::{
         cancel_transfer_via_sdk, CancelAck,
         serve_control_stream, serve_control_stream_cancellable, request_get_via_sdk,
         SdkTransferError, send_via_managed_sdk_with_progress,
+        send_via_managed_sdk_cancellable,
         serve_control_stream_with_lease, ControlIo, IncomingResult},
     secure_io::SharedRoot,
     stream_transfer::{receive_file, send_file, TransferReceipt},
@@ -294,6 +295,45 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                         }).await.expect("remote GET sender ignored authenticated cancel");
                     assert!(matches!(transfer, Err(SdkTransferError::Cancelled)));
                     assert!(matches!(canceled_rpc.unwrap(), IncomingResult::DirectoryListed));
+
+                    // The RECEIVING peer can stop a remote-initiated PUT:
+                    // no local CLI task exists on the recipient. Exercise
+                    // the real SDK Control and managed Data pool, with the
+                    // sender waiting for its first receiver disk ACK.
+                    let put_sender_registry = TransferCancels::default();
+                    let (put_sender, peer_cancel, cancel_handler) =
+                        tokio::time::timeout(Duration::from_secs(15), async {
+                            tokio::join!(
+                                send_via_managed_sdk_cancellable(
+                                    &creator, &creator_pool, &source,
+                                    (Path::new("中文名.txt"), "receiver-canceled.bin"),
+                                    37, None, &put_sender_registry,
+                                ),
+                                async {
+                                    // Never let CANCEL arrive before sender
+                                    // registration in this in-flight test.
+                                    loop {
+                                        if put_sender_registry.active_ids().contains(&37) {
+                                            break;
+                                        }
+                                        tokio::task::yield_now().await;
+                                    }
+                                    cancel_transfer_via_sdk(&joiner, 37).await
+                                },
+                                async {
+                                    let (send, recv) =
+                                        creator.control.accept_bi().await.unwrap();
+                                    serve_control_stream_cancellable(
+                                        &creator, &source, (send, recv), None,
+                                        Some(&creator_pool), None, Some(&put_sender_registry),
+                                    ).await
+                                },
+                            )
+                        }).await.expect("receiver could not stop remote PUT sender");
+                    assert!(matches!(put_sender, Err(SdkTransferError::Cancelled)));
+                    assert_eq!(peer_cancel.unwrap(), CancelAck::Stopped);
+                    assert!(matches!(cancel_handler.unwrap(), IncomingResult::DirectoryListed));
+                    assert!(put_sender_registry.active_ids().is_empty());
 
                     creator_pool.shutdown().await;
                     joiner_pool.shutdown().await;
