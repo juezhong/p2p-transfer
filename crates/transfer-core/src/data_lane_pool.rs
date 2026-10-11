@@ -21,7 +21,7 @@ use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use tokio::{sync::{watch, RwLock}, task::JoinSet};
 
 use p2p_sdk::{
-    channel::ChannelRole,
+    channel::LinkProofClass,
     manual_pairing::ManualPairing,
     peer_pin::PeerCertificatePin,
     session_binding::{
@@ -129,20 +129,20 @@ impl ResilientDataLanes {
         }
         if session.session_id() != pairing.credentials.session_id()
             || session.remote_certificate_sha256() != pairing.remote_tls_cert_sha256
-            || session.control().close_reason().is_some()
-            || session.data().close_reason().is_some()
+            || session.first().close_reason().is_some()
+            || session.second().close_reason().is_some()
         {
             return Err(LanePoolError::SessionMismatch);
         }
         let mut slots = vec![None; desired];
-        slots[0] = Some(session.data().clone());
+        slots[0] = Some(session.second().clone());
         let (changed, _) = watch::channel(DataLaneStatus {
             active: 1, desired, generation: 0,
         });
         let (stop, stopped) = watch::channel(false);
         let pool = Self {
             state: Arc::new(LaneState {
-                control: session.control().clone(),
+                control: session.first().clone(),
                 lanes: RwLock::new(slots),
                 changed,
                 next_lane: AtomicUsize::new(0),
@@ -245,7 +245,7 @@ impl ResilientDataLanes {
         });
         // Monitor initial Data lane; accepted replacement lanes get monitors
         // inside the accept task after successful mutual authentication.
-        let initial = session.data().clone();
+        let initial = session.second().clone();
         let state = Arc::clone(&pool.state);
         let stop = pool.stop.subscribe();
         tokio::spawn(watch_installed_lane(state, stop, 0, initial));
@@ -442,7 +442,7 @@ async fn maintain_creator_lane(
                 return Err(());
             }
             let clone = connection.clone();
-            match authenticate_initiator(connection, &credentials, ChannelRole::Data, HANDSHAKE_DEADLINE).await {
+            match authenticate_initiator(connection, &credentials, LinkProofClass::Additional, HANDSHAKE_DEADLINE).await {
                 Ok(_) => Ok(clone),
                 Err(_) => {
                     clone.close(1u32.into(), b"data session proof failed");
@@ -520,7 +520,7 @@ async fn maintain_independent_creator_lane(
             }
             let clone = connection.clone();
             match authenticate_initiator(
-                connection, &credentials, ChannelRole::Data, HANDSHAKE_DEADLINE,
+                connection, &credentials, LinkProofClass::Additional, HANDSHAKE_DEADLINE,
             ).await {
                 Ok(_) => Ok((owner, endpoint, clone)),
                 Err(_) => {
@@ -565,7 +565,7 @@ async fn maintain_independent_creator_lane(
             }
             let clone = connection.clone();
             if authenticate_initiator(
-                connection, &credentials, ChannelRole::Data, HANDSHAKE_DEADLINE,
+                connection, &credentials, LinkProofClass::Additional, HANDSHAKE_DEADLINE,
             ).await.is_err() {
                 clone.close(1u32.into(), b"data session proof failed");
                 return Err(());
@@ -628,7 +628,7 @@ async fn accept_joiner_lanes(
                     return Err(());
                 }
                 match authenticate_responder(
-                    connection, &credentials, ChannelRole::Data, &guard, HANDSHAKE_DEADLINE
+                    connection, &credentials, LinkProofClass::Additional, &guard, HANDSHAKE_DEADLINE
                 ).await {
                     Ok(_) => Ok(clone),
                     Err(_) => {

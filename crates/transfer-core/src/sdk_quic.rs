@@ -47,15 +47,15 @@ pub trait AuthenticatedSession: private::Sealed + Send + Sync {
 
 impl AuthenticatedSession for VerifiedManualSession {
     fn control(&self) -> &quinn::Connection {
-        VerifiedManualSession::control(self)
+        VerifiedManualSession::first(self)
     }
     fn initial_data(&self) -> Option<&quinn::Connection> {
-        Some(VerifiedManualSession::data(self))
+        Some(VerifiedManualSession::second(self))
     }
 }
 
 impl AuthenticatedSession for ConnectedTransportPeer {
-    fn control(&self) -> &quinn::Connection { &self.control }
+    fn control(&self) -> &quinn::Connection { &self.bootstrap }
     fn initial_data(&self) -> Option<&quinn::Connection> { None }
 }
 

@@ -151,12 +151,12 @@ fn real_sdk_manual_pairing_ice_mtls_dual_quic_transfers_file_to_disk() {
             let receipt = receive_via_sdk(&session, &dst).await.unwrap();
 
             // The Control QUIC session stays alive and can serve ls + GET.
-            let (tx, rx) = session.control().accept_bi().await.unwrap();
+            let (tx, rx) = session.first().accept_bi().await.unwrap();
             assert!(matches!(
                 serve_control_stream(&session, &dst, tx, rx).await.unwrap(),
                 IncomingResult::DirectoryListed
             ));
-            let (tx, rx) = session.control().accept_bi().await.unwrap();
+            let (tx, rx) = session.first().accept_bi().await.unwrap();
             assert!(matches!(
                 serve_control_stream(&session, &dst, tx, rx).await.unwrap(),
                 IncomingResult::ServedGet(_)

@@ -110,7 +110,7 @@ fn role_for(cmd: &str, position: usize) -> Option<(bool, bool)> {
         ("get", 2) => Some((false, false)),
         ("put", 1) => Some((false, false)),
         ("put", 2) => Some((true, false)),
-        ("sha256" | "md5", 1) => Some((false, false)),
+        ("sha256" | "md5" | "checksum", 1) => Some((false, false)),
         _ => None,
     }
 }
@@ -149,7 +149,7 @@ async fn complete(
     let Some(current) = words.last() else { return (pos, Vec::new()) };
     if words.len() == 1 {
         let candidates = ["pwd", "ls", "cd", "lpwd", "lls", "lcd",
-            "put", "get", "sha256", "md5", "status", "cancel", "help", "quit", "exit"];
+            "put", "get", "sha256", "md5", "checksum", "status", "cancel", "help", "quit", "exit"];
         return (current.start, candidates.into_iter()
             .filter(|s| s.starts_with(&current.value))
             .map(|s| Pair { display: s.to_owned(), replacement: s.to_owned() })

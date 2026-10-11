@@ -56,7 +56,7 @@ impl ModernDataLanes {
             return Err(ModernLaneError::InvalidCapacity);
         }
         let handles = (0..desired)
-            .map(|_| peer.manage_authenticated_data())
+            .map(|_| peer.manage_link())
             .collect();
         Ok(Self {
             peer, handles: Mutex::new(handles),
@@ -86,7 +86,7 @@ impl ModernDataLanes {
     pub async fn available(&self) -> Vec<Connection> {
         let handles = self.handles.lock().await;
         if self.stopping.load(Ordering::Acquire)
-            || self.peer.control.close_reason().is_some()
+            || self.peer.bootstrap.close_reason().is_some()
         {
             return Vec::new();
         }
@@ -105,7 +105,7 @@ impl ModernDataLanes {
                 let current = self.available().await;
                 if current.len() >= minimum { return Ok(current); }
                 tokio::select! {
-                    _ = self.peer.control.closed() => return Err(ModernLaneError::ControlLost),
+                    _ = self.peer.bootstrap.closed() => return Err(ModernLaneError::ControlLost),
                     _ = tokio::time::sleep(Duration::from_millis(80)) => {}
                 }
             }
@@ -116,7 +116,7 @@ impl ModernDataLanes {
         if self.stopping.load(Ordering::Acquire) {
             return Err(ModernLaneError::ShuttingDown);
         }
-        if self.peer.control.close_reason().is_some() {
+        if self.peer.bootstrap.close_reason().is_some() {
             return Err(ModernLaneError::ControlLost);
         }
         Ok(())
@@ -129,13 +129,13 @@ impl ModernDataLanes {
                 for lane in self.available().await {
                     // Connection may become unavailable between snapshot and stream open.
                     let opened = tokio::select! {
-                        _ = self.peer.control.closed() => return Err(ModernLaneError::ControlLost),
+                        _ = self.peer.bootstrap.closed() => return Err(ModernLaneError::ControlLost),
                         result = timeout(Duration::from_secs(2), lane.open_uni()) => result,
                     };
                     if let Ok(Ok(stream)) = opened { return Ok(stream); }
                 }
                 tokio::select! {
-                    _ = self.peer.control.closed() => return Err(ModernLaneError::ControlLost),
+                    _ = self.peer.bootstrap.closed() => return Err(ModernLaneError::ControlLost),
                     _ = tokio::time::sleep(Duration::from_millis(80)) => {}
                 }
             }
@@ -164,7 +164,7 @@ impl ModernDataLanes {
                             if let Ok(stream) = received { return Ok(stream); }
                         }
                     }
-                    _ = self.peer.control.closed() => return Err(ModernLaneError::ControlLost),
+                    _ = self.peer.bootstrap.closed() => return Err(ModernLaneError::ControlLost),
                     _ = tokio::time::sleep(Duration::from_millis(150)) => {}
                 }
             }
