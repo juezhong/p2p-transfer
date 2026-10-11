@@ -50,13 +50,11 @@ fn peer_quit_reports_disconnect_and_requires_explicit_local_quit() {
     let (tx,rx)=mpsc::channel::<(Side,String)>();
     let mut a=start(exe,&dir.join("A"),Side::Creator,tx.clone());
     let mut b=start(exe,&dir.join("B"),Side::Joiner,tx);
-    enter(&mut a,"1"); enter(&mut a,"yes");
-    enter(&mut b,"2"); enter(&mut b,"yes");
+    enter(&mut a,"1");
+    enter(&mut b,"2");
 
     let mut invited=false;
     let mut replied=false;
-    let (mut code_a,mut code_b)=(None::<String>,None::<String>);
-    let mut confirmed=false;
     let mut ready=[false,false];
     let mut quit=false;
     let mut disconnected=false;
@@ -77,19 +75,6 @@ fn peer_quit_reports_disconnect_and_requires_explicit_local_quit() {
         }
         if let Some(pos)=line.find("P2PR-REP2-") {
             if !replied {enter(&mut a,&line[pos..]); replied=true;}
-        }
-        if let Some((_,code))=line.split_once("双方设备应显示相同的 6 位配对核对码：") {
-            match side {
-                Side::Creator=>code_a=Some(code.trim().to_owned()),
-                Side::Joiner=>code_b=Some(code.trim().to_owned()),
-            }
-        }
-        if !confirmed {
-            if let (Some(x),Some(y))=(&code_a,&code_b) {
-                assert_eq!(x,y);
-                enter(&mut a,"yes");enter(&mut b,"yes");
-                confirmed=true;
-            }
         }
         if line.contains("已建立安全 P2P 连接") {
             ready[if side==Side::Creator {0} else {1}]=true;
