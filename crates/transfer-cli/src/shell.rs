@@ -684,6 +684,29 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                 }
                 match cmd.as_str() {
                     "quit" | "exit" | "bye" => {
+                        // 正常退出不能无意中结束另一设备发起的任务。
+                        if !disconnected && session.control().close_reason().is_none() {
+                            let status = if is_creator {
+                                Some(authoritative_task_status(&arbiter, &remote_grant.lock().await))
+                            } else {
+                                match tokio::time::timeout(Duration::from_secs(3),
+                                    task_status_via_sdk(&session, next_id())).await {
+                                    Ok(Ok(status)) => Some(status),
+                                    _ => None,
+                                }
+                            };
+                            match status {
+                                Some(SessionTaskStatus::Idle) => {}
+                                Some(_) => {
+                                    println!("[退出] 文件传输进行中：发起方请先 cancel，另一方需等待任务完成");
+                                    continue;
+                                }
+                                None => {
+                                    println!("[退出] 无法确认双方任务已结束，请重试或等待连接断开");
+                                    continue;
+                                }
+                            }
+                        }
                         if let Some(worker) = task.take() {
                             worker.abort();
                             let _ = worker.await;
