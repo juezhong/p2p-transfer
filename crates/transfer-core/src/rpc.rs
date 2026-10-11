@@ -1,6 +1,7 @@
 //! Bounded directory and GET RPC payloads on Transfer's Control QUIC.
-//! No NAT/TLS implementation here. Remote access is always scoped to an
-//! explicitly granted capability root, never a process-wide filesystem.
+//! No NAT/TLS implementation here. Capability-scoped library users stay
+//! within their roots; Go-style interactive sessions deliberately grant
+//! the filesystem the local process can access, not merely their start cwd.
 
 use std::{ffi::OsString, path::Path};
 
@@ -16,6 +17,7 @@ const ACQUIRE_TRANSFER_OP: u8 = 5;
 const RELEASE_TRANSFER_OP: u8 = 6;
 const ROOT_INFO_OP: u8 = 7;
 const CANCEL_TRANSFER_OP: u8 = 8;
+const START_DIRECTORY_OP: u8 = 9;
 const MAX_ENTRIES: usize = 8192;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +33,8 @@ pub enum RpcRequest {
     RootInfo,
     /// Authenticated cancel request; request_id identifies the target file.
     CancelTransfer,
+    /// Displays the peer's launch working directory, not just its root.
+    StartDirectory,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,6 +87,7 @@ impl RpcRequest {
             Self::ReleaseTransfer => bytes.push(RELEASE_TRANSFER_OP),
             Self::RootInfo => bytes.push(ROOT_INFO_OP),
             Self::CancelTransfer => bytes.push(CANCEL_TRANSFER_OP),
+            Self::StartDirectory => bytes.push(START_DIRECTORY_OP),
             Self::Get { source, destination } => {
                 bytes.push(GET_OP);
                 push_string(&mut bytes, source)?;
@@ -109,6 +114,7 @@ impl RpcRequest {
             RELEASE_TRANSFER_OP => Self::ReleaseTransfer,
             ROOT_INFO_OP => Self::RootInfo,
             CANCEL_TRANSFER_OP => Self::CancelTransfer,
+            START_DIRECTORY_OP => Self::StartDirectory,
             GET_OP => Self::Get {
                 source: read_string(bytes, &mut pos)?.to_owned(),
                 destination: read_string(bytes, &mut pos)?.to_owned(),
@@ -229,6 +235,7 @@ mod tests {
             RpcRequest::MakeDirectory { directory: "new/子目录".into() },
             RpcRequest::AcquireTransfer,
             RpcRequest::RootInfo,
+            RpcRequest::StartDirectory,
             RpcRequest::CancelTransfer,
             RpcRequest::ReleaseTransfer,
         ] {
