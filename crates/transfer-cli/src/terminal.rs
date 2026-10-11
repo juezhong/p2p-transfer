@@ -21,6 +21,8 @@ struct Screen {
     cursor: usize, // UTF-8 byte boundary
     active: bool,
     status_row: bool,
+    // 校验等待期间，提示符暂停，但仍在同一行持续刷新传输进度。
+    standalone_status: bool,
     progress: Option<String>,
     history: Vec<String>,
     history_index: Option<usize>,
@@ -162,8 +164,12 @@ pub fn finish() {
             }
             let _ = writeln!(out);
         }
+        if !screen.active && screen.standalone_status {
+            let _ = write!(out, "\r\x1b[2K\r\n");
+        }
         screen.active = false;
         screen.status_row = false;
+        screen.standalone_status = false;
         screen.progress = None;
         screen.input.clear();
         screen.cursor = 0;
@@ -182,7 +188,22 @@ pub fn progress(text: Option<String>) {
         // A 1 Hz idle tick must not redraw a line the user is editing.
         if screen.progress == text { return; }
         screen.progress = text;
-        redraw(&mut screen);
+        if screen.active {
+            redraw(&mut screen);
+        } else {
+            // 输入线程正在等待 checksum 返回时，进度依然在原地刷新。
+            let mut out = io::stdout().lock();
+            let line = screen.progress.as_deref().unwrap_or("");
+            if !line.is_empty() {
+                let visible = clipped(line, columns().saturating_sub(1));
+                let _ = write!(out, "\r\x1b[2K{visible}");
+                screen.standalone_status = true;
+            } else if screen.standalone_status {
+                let _ = write!(out, "\r\x1b[2K");
+                screen.standalone_status = false;
+            }
+            let _ = out.flush();
+        }
     }
 }
 
@@ -207,6 +228,15 @@ pub fn log(text: String) {
             // We are now on a fresh empty line; recreate the two-row layout.
             screen.status_row = false;
             redraw(&mut screen);
+        } else if screen.standalone_status {
+            let mut out = io::stdout().lock();
+            let _ = write!(out, "\r\x1b[2K");
+            let _ = writeln!(out, "{text}");
+            if let Some(progress) = &screen.progress {
+                let visible = clipped(progress, columns().saturating_sub(1));
+                let _ = write!(out, "{visible}");
+            }
+            let _ = out.flush();
         } else {
             std::println!("{text}");
         }
@@ -304,6 +334,15 @@ pub fn supported() -> bool { false }
 #[cfg(unix)]
 pub fn read_line(prompt: &str, requests: &UnboundedSender<CompletionQuery>) -> io::Result<String> {
     let _raw = RawMode::begin()?;
+    // 从无输入状态恢复时，先擦掉先前单行的传输进度。
+    if let Ok(mut state) = shared().lock() {
+        if state.standalone_status {
+            let mut out = io::stdout().lock();
+            let _ = write!(out, "\r\x1b[2K");
+            let _ = out.flush();
+            state.standalone_status = false;
+        }
+    }
     update_line(|s| {
         s.prompt = prompt.to_owned();
         s.input.clear();
