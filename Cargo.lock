@@ -1317,7 +1317,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 [[package]]
 name = "p2p-sdk"
 version = "0.1.0"
-source = "git+https://github.com/juezhong/p2p-sdk?rev=24a9b5521f682eaf70eb9453780ccb16853e20c2#24a9b5521f682eaf70eb9453780ccb16853e20c2"
+source = "git+https://github.com/juezhong/p2p-sdk?rev=2702f3e2215dc5733167b5e4e56da47bd8328a10#2702f3e2215dc5733167b5e4e56da47bd8328a10"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.3.4",

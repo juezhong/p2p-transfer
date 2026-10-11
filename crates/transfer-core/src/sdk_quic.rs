@@ -55,7 +55,7 @@ impl AuthenticatedSession for VerifiedManualSession {
 }
 
 impl AuthenticatedSession for ConnectedTransportPeer {
-    fn control(&self) -> &quinn::Connection { &self.control }
+    fn control(&self) -> &quinn::Connection { &self.bootstrap }
     fn initial_data(&self) -> Option<&quinn::Connection> { None }
 }
 

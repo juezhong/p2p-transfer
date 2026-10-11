@@ -481,7 +481,7 @@ pub async fn run(peer: ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let session = Arc::clone(&peer.session);
     let lanes = Arc::clone(&peer.data_lanes);
     let result = run_shell(&peer, root).await;
-    session.control.close(0u32.into(), b"user ended transfer shell");
+    session.bootstrap.close(0u32.into(), b"user ended transfer shell");
     lanes.shutdown().await;
     drop(lanes);
     drop(peer);
@@ -748,7 +748,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                             if session.control().close_reason().is_none() {
                                 "已连接"
                             } else { "已断开" },
-                            if d.control_outbound { "主动拨号" } else { "被动接入" });
+                            if d.bootstrap_outbound { "主动拨号" } else { "被动接入" });
                         println!("  本机 UDP    {}", d.actual_local_udp);
                         println!("  对端 UDP    {}", d.actual_remote_udp);
                         println!("  ICE         {:?} / 对端候选 {}",
