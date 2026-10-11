@@ -2090,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "transfer-cli"
-version = "0.1.0-test.7"
+version = "0.1.0-test.8"
 dependencies = [
  "libc",
  "p2p-sdk",

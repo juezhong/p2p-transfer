@@ -232,3 +232,10 @@
 - **无需 P2P_TRANSFER_SHARE_ROOT、无需启动共享目录 yes**。默认 `pwd/lpwd` 与提示符均从真实启动路径开始；`cd ..`、绝对路径 PUT/GET、lcd/ls 和远端目录访问跨越启动目录。普通 `SharedRoot::authorize` 原有有限目录能力仍保留给明确限制权限的库调用场景与测试，数据操作仍走 cap-std Dir 和操作系统权限，不信任远端无验证的系统路径。
 - **风险边界显著改变**：通过首次 INVITE/REPLY 配对的对端可读取或修改本机当前权限账户可访问的全系统文件；与用户指定的 Go 工作流一致，但务必避免 root 用户配对不可信设备，勿公开连接码。Windows 目前仅启动盘符，跨卷仍不具备 Unix 的全部范围。
 - 测试取消原有的两次目录 yes 和历史六位 SAS 等待，增加默认全系统范围下启动 cwd 与非启动目录外文件访问回归。新版 Release 仍是测试版，尚需 CI 和真实设备验收。
+
+## 2026-10-11：v0.1.0-test.8 真实双机交互/取消修复批次
+
+- test.7 Linux x86_64 ↔ RK3568 用户日志验证局域网 Host 直连、4/4 Data、GET 约500MiB 中可发送 CANCEL，但仍出现未区分发起方的取消操作、文件进度相对路径、双端终端输入行重绘与退出后系统提示符污染。
+- test.8：取消本端活跃的 Remote-initiated Transfer，包括 registry 的传输 ID；取消请求异步并确认后返回，Control 消息泵始终畅通；状态区分远端发起任务。发送/接收路径由 SharedRoot 的显示根恢复为真正的本机绝对路径，进度只显示剩余 ETA。
+- Unix terminal 单线程 owner 的屏幕清理和输入线程退出路径修复；备份并还原 termios，避免退出后仍残留终端 raw 模式。欢迎/帮助明确显示 quit / exit。
+- SDK 认证、ICE 与 Data pool 不改；真实 LAN 全 2GiB SHA、双向取消重试与跨 NAT 仍需用户的实体设备复测。完整 CI 全绿且发行 job 确实上传资产之前不得称 test.8 已发布。

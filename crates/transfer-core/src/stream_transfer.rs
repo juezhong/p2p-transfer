@@ -174,7 +174,8 @@ where
     let mut file = root.open_read(source)?;
     let bytes = file.metadata()?.len();
     if let Some(p) = progress {
-        p.begin_id(request_id, "发送", source.display().to_string(), bytes);
+        p.begin_id(request_id, "发送",
+            root.display_root().join(source).display().to_string(), bytes);
     }
     let mut hasher = Sha256::new();
     let mut buf = [0u8; CHUNK];
@@ -277,7 +278,10 @@ where
             return Err(err);
         }
     };
-    if let Some(p) = progress { p.begin_id(request_id, "接收", offer.destination.clone(), offer.bytes); }
+    if let Some(p) = progress {
+        p.begin_id(request_id, "接收",
+            root.display_root().join(&offer.destination).display().to_string(), offer.bytes);
+    }
     let mut sink = match root.receive_part(Path::new(&offer.destination), offer.bytes) {
         Ok(sink) => sink,
         Err(err) => {
@@ -336,15 +340,19 @@ mod tests {
         fs::write(base.join("source/大文件.bin"), &bytes).unwrap();
         let (mut a_ctrl, mut b_ctrl) = duplex(256 * 1024);
         let (mut a_data, mut b_data) = duplex(256 * 1024);
+        let progress = TransferProgress::default();
         let (send, receive) = tokio::join!(
-            send_file(&mut a_ctrl, &mut a_data, &src, Path::new("大文件.bin"),
-                      "子目录/接收.bin", 7),
+            send_file_with_progress(&mut a_ctrl, &mut a_data, &src, Path::new("大文件.bin"),
+                      "子目录/接收.bin", 7, Some(&progress)),
             receive_file(&mut b_ctrl, &mut b_data, &dst),
         );
         let sent = send.unwrap();
         let received = receive.unwrap();
         assert_eq!(sent, received);
         assert_eq!(sent.bytes, bytes.len() as u64);
+        assert_eq!(progress.snapshot().unwrap().file,
+            fs::canonicalize(base.join("source")).unwrap()
+                .join("大文件.bin").display().to_string());
         assert_eq!(fs::read(dst_path.join("子目录/接收.bin")).unwrap(), bytes);
         assert_eq!(crate::secure_io::hash_open_file(
             dst.open_read(Path::new("子目录/接收.bin")).unwrap()
