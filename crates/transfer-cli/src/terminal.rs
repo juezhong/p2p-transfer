@@ -40,20 +40,94 @@ fn width(text: &str) -> usize {
 #[cfg(not(unix))]
 fn width(text: &str) -> usize { text.chars().count() }
 
+#[cfg(unix)]
+fn columns() -> usize {
+    let mut size = std::mem::MaybeUninit::<libc::winsize>::uninit();
+    // SAFETY: ioctl fills winsize for the currently open stdout fd.
+    let ok = unsafe { libc::ioctl(io::stdout().as_raw_fd(), libc::TIOCGWINSZ, size.as_mut_ptr()) };
+    if ok == 0 {
+        // SAFETY: initialized by a successful ioctl above.
+        let cols = unsafe { size.assume_init() }.ws_col as usize;
+        if cols > 20 { return cols; }
+    }
+    80
+}
+#[cfg(not(unix))]
+fn columns() -> usize { 80 }
+
+fn clipped(text: &str, max: usize) -> String {
+    let mut used = 0;
+    let mut result = String::new();
+    for ch in text.chars() {
+        let cells = width(&ch.to_string());
+        if used + cells > max { break; }
+        used += cells;
+        result.push(ch);
+    }
+    result
+}
+
+// Keep the connection-type badge readable even when the remote cwd is long.
+// The complete directory remains available through pwd.
+fn compact_prompt(prompt: &str, max: usize) -> String {
+    if width(prompt) <= max { return prompt.to_owned(); }
+    let prefix = prompt.split_once("] ").map(|(prefix, _)| format!("{prefix}] "))
+        .unwrap_or_default();
+    let budget = max.saturating_sub(width(&prefix) + 1);
+    let mut tail = String::new();
+    for ch in prompt.chars().rev() {
+        let candidate = format!("{ch}{tail}");
+        if width(&candidate) > budget { break; }
+        tail = candidate;
+    }
+    format!("{prefix}…{tail}")
+}
+
+// Window the command around the true cursor rather than allowing a long
+// absolute path to wrap onto the status row. The text buffer stays complete.
+fn input_view(prompt: &str, input: &str, cursor: usize, cols: usize) -> (String, usize) {
+    let max = cols.saturating_sub(1).max(10);
+    let label = compact_prompt(prompt, max.saturating_sub(8));
+    let full = format!("{label}{input}");
+    let cursor_col = width(&label) + width(&input[..cursor]);
+    let start_col = cursor_col.saturating_sub(max.saturating_sub(5));
+    let mut current = 0;
+    let mut view = String::new();
+    let mut cursor_visible = 0;
+    for ch in full.chars() {
+        let cells = width(&ch.to_string());
+        let next = current + cells;
+        if next > start_col && current < start_col + max {
+            if width(&view) + cells <= max {
+                view.push(ch);
+            }
+        }
+        if next <= cursor_col && next > start_col {
+            cursor_visible = width(&view);
+        }
+        current = next;
+        if current >= start_col + max { break; }
+    }
+    let move_left = width(&view).saturating_sub(cursor_visible);
+    (view, move_left)
+}
+
 fn redraw(screen: &mut Screen) {
     if !screen.active { return; }
+    let cols = columns();
     let mut out = io::stdout().lock();
     if screen.status_row {
-        let status = screen.progress.as_deref().unwrap_or("");
+        let status = clipped(screen.progress.as_deref().unwrap_or(""), cols.saturating_sub(1));
         let _ = write!(out, "\r\x1b[1A\r\x1b[2K{status}\r\n\x1b[2K");
     } else if let Some(status) = &screen.progress {
         screen.status_row = true;
+        let status = clipped(status, cols.saturating_sub(1));
         let _ = write!(out, "\r\x1b[2K{status}\r\n\x1b[2K");
     } else {
         let _ = write!(out, "\r\x1b[2K");
     }
-    let _ = write!(out, "{}{}", screen.prompt, screen.input);
-    let tail = width(&screen.input[screen.cursor..]);
+    let (text, tail) = input_view(&screen.prompt, &screen.input, screen.cursor, cols);
+    let _ = write!(out, "{text}");
     if tail != 0 { let _ = write!(out, "\x1b[{tail}D"); }
     let _ = out.flush();
 }
@@ -301,6 +375,18 @@ mod tests {
     #[test]
     fn unicode_display_width_and_cursor_boundaries() {
         assert_eq!(width("中文a"), 5);
+        assert_eq!(clipped("中文路径123", 6), "中文路");
+        let (display, back) = input_view(
+            "[IPv4 局域网直连] /some/very/long/path/to/files> ",
+            "get /home/person/Documents/1234567890/abcdef.bin",
+            "get /home/person/Documents/1234567890/abcdef.bin".len(), 40,
+        );
+        assert!(width(&display) < 40);
+        assert!(display.contains("abcdef.bin"));
+        assert_eq!(back, 0);
+        assert!(compact_prompt("[IPv4 LAN] /very/long/remote/path> ", 25)
+            .starts_with("[IPv4 LAN] "));
+
         let mut screen = Screen::default();
         #[cfg(unix)]
         {
