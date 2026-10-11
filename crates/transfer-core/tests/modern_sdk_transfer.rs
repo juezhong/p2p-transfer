@@ -339,6 +339,9 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                                     &creator, &source, (send, recv), None,
                                     Some(&creator_pool), None, Some(&put_sender_registry),
                                 ).await;
+                                eprintln!("receiver-cancel server handled={handled:?} active={:?} finished={}",
+                                    put_sender_registry.active_ids(),
+                                    put_sender_registry.was_finished(37));
                                 milestones.fetch_or(32, std::sync::atomic::Ordering::SeqCst);
                                 handled
                             },
