@@ -97,10 +97,10 @@ fn input_view(prompt: &str, input: &str, cursor: usize, cols: usize) -> (String,
     for ch in full.chars() {
         let cells = width(&ch.to_string());
         let next = current + cells;
-        if next > start_col && current < start_col + max {
-            if width(&view) + cells <= max {
-                view.push(ch);
-            }
+        if next > start_col && current < start_col + max
+            && width(&view) + cells <= max
+        {
+            view.push(ch);
         }
         if next <= cursor_col && next > start_col {
             cursor_visible = width(&view);
