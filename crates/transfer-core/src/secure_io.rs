@@ -43,18 +43,50 @@ fn io_error(_: io::Error) -> FileAccessError {
 pub struct SharedRoot {
     root: Dir,
     display_root: PathBuf,
+    starting_directory: PathBuf,
 }
 
 impl SharedRoot {
-    /// The user explicitly authorizes one local root directory. Do not
-    /// obtain this from an untrusted remote command or invitation.
+    /// Capability-scoped root for library callers, kept for compatibility
+    /// with tests and sessions that deliberately restrict access.
     pub fn authorize(root: &Path) -> Result<Self, FileAccessError> {
         let display_root = std::fs::canonicalize(root).map_err(io_error)?;
-        let root = Dir::open_ambient_dir(root, ambient_authority()).map_err(io_error)?;
-        Ok(Self { root, display_root })
+        let root = Dir::open_ambient_dir(&display_root, ambient_authority())
+            .map_err(io_error)?;
+        Ok(Self {
+            root,
+            starting_directory: display_root.clone(),
+            display_root,
+        })
     }
 
-    /// A display-only path for the explicitly user-approved capability root.
+    /// Go-style interactive shell: start at cwd but permit file access across
+    /// the running user's filesystem on Unix (current volume on Windows).
+    /// Only OS filesystem permissions apply; the peer can read and write
+    /// any files this process could access. Caller must surface this scope.
+    pub fn for_interactive_shell(cwd: &Path) -> Result<Self, FileAccessError> {
+        let starting_directory = std::fs::canonicalize(cwd).map_err(io_error)?;
+        #[cfg(unix)]
+        let filesystem_root = Path::new("/");
+        #[cfg(windows)]
+        let filesystem_root = starting_directory.ancestors().last()
+            .ok_or(FileAccessError::InvalidRelativePath)?;
+        let mut access = Self::authorize(filesystem_root)?;
+        access.starting_directory = starting_directory;
+        Ok(access)
+    }
+
+    pub fn starting_directory(&self) -> &Path {
+        &self.starting_directory
+    }
+
+    pub fn starting_relative(&self) -> Result<PathBuf, FileAccessError> {
+        self.starting_directory.strip_prefix(&self.display_root)
+            .map(Path::to_path_buf)
+            .map_err(|_| FileAccessError::InvalidRelativePath)
+    }
+
+    /// A display-only path for the session's filesystem root.
     /// File access still uses the directory handle, never this path string.
     pub fn display_root(&self) -> &Path {
         &self.display_root
