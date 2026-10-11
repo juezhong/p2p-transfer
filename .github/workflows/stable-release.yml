@@ -1,0 +1,155 @@
+name: Stable CLI release (test.8 source)
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/stable-release.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/stable-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  SOURCE_COMMIT: e78f2083b9807c7fdc1864e4c4cd9ea824ca0c62
+  STABLE_TAG: v0.1.0
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Verify exact test.8 source and version
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          grep -q '^version = "0.1.0-test.8"$' crates/transfer-cli/Cargo.toml
+      - name: Format Rust code in CI workspace only
+        run: cargo fmt --all
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Workspace tests
+        run: cargo test --locked --workspace
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, filename: p2p-transfer-windows-x86_64.exe, executable: p2p-transfer.exe }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, filename: p2p-transfer-macos-x86_64, executable: p2p-transfer }
+          - { os: macos-latest, target: aarch64-apple-darwin, filename: p2p-transfer-macos-aarch64, executable: p2p-transfer }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, filename: p2p-transfer-linux-x86_64, executable: p2p-transfer }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, filename: p2p-transfer-linux-aarch64, executable: p2p-transfer }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, filename: p2p-transfer-linux-x86_64-musl, executable: p2p-transfer }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, filename: p2p-transfer-linux-aarch64-musl, executable: p2p-transfer }
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+      - name: Verify exact test.8 source
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools binutils
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: ${{ matrix.target }}
+      - name: Cargo source cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-src-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: |
+            cargo-src-${{ runner.os }}-
+      - name: Format Rust code in CI workspace only
+        run: cargo fmt --all
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Run workspace tests
+        run: cargo test --locked --workspace --target ${{ matrix.target }}
+      - name: Build release CLI
+        run: cargo build --locked -p transfer-cli --bin p2p-transfer --release --target ${{ matrix.target }}
+      - name: Ensure musl binary is static
+        if: contains(matrix.target, 'musl')
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/${{ matrix.executable }}"
+          ! readelf -l "$BIN" | grep -q INTERP
+          ! readelf -d "$BIN" | grep -q NEEDED
+      - name: Copy release binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "dist/${{ matrix.filename }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stable-${{ matrix.target }}
+          path: dist/${{ matrix.filename }}
+          if-no-files-found: error
+
+  publish:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Ensure only CI workflow changed since test.8
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$SOURCE_COMMIT" "$GITHUB_SHA"
+          test "$(git diff --name-only "$SOURCE_COMMIT" "$GITHUB_SHA")" = ".github/workflows/stable-release.yml"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: stable-*
+          merge-multiple: true
+          path: dist
+      - name: Publish stable release from original test.8 commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$STABLE_TAG" >/dev/null 2>&1; then
+            echo "$STABLE_TAG already exists; will not overwrite."
+            exit 0
+          fi
+          test "$(find dist -maxdepth 1 -name 'p2p-transfer-*' -type f | wc -l)" -eq 7
+          (cd dist && sha256sum p2p-transfer-* > SHA256SUMS.txt)
+          gh release create "$STABLE_TAG" dist/p2p-transfer-* dist/SHA256SUMS.txt \
+            --target "$SOURCE_COMMIT" \
+            --title "p2p-transfer v0.1.0 (stable CLI, test.8 baseline)" \
+            --notes "首个稳定 CLI 版本。完全采用 v0.1.0-test.8 的原始源码提交与依赖锁定，未修改业务代码。七目标重新测试、构建并附 SHA256SUMS.txt。注意：由于原始代码未修改，程序 --version 仍显示 0.1.0-test.8。现有网络恢复、2 GiB 和 NAT 验收限制保持不变。Unix 配对设备可按运行账户权限访问本机文件系统，请勿以 root 与不可信设备连接。" \
+            --latest
