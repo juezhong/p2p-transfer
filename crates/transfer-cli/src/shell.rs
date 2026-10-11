@@ -688,7 +688,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                 if args.is_empty() { continue; }
                 let cmd = args[0].to_lowercase();
                 if (disconnected || session.control().close_reason().is_some())
-                    && !matches!(cmd.as_str(), "quit" | "exit" | "bye") {
+                    && !matches!(cmd.as_str(), "quit" | "exit" | "bye" | "sha256" | "md5") {
                     println!("[连接] 对端已经断开；任何操作都无法继续，请输入 quit 退出。");
                     continue;
                 }
