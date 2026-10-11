@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Peer { Creator, Joiner }
 
 fn launch(exe: &str, cwd: &Path, peer: Peer, reports: Sender<(Peer, String)>) -> Child {
@@ -59,21 +59,19 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
     let exe = env!("CARGO_BIN_EXE_p2p-transfer");
     let (base, a_root, b_root) = fixture();
     let content = "Rust 控制面和数据面严格分开！".repeat(12_000);
-    fs::write(a_root.join("原始.txt"), content.as_bytes()).unwrap();
+    // Source and remote destination are BOTH outside each process's
+    // launch cwd. Go-style absolute paths must still work over authenticated
+    // QUIC and the filesystem must never be restricted to the startup dir.
+    fs::write(base.join("原始跨目录.txt"), content.as_bytes()).unwrap();
     let (tx, rx) = mpsc::channel::<(Peer, String)>();
     let mut a = launch(exe, &a_root, Peer::Creator, tx.clone());
     let mut b = launch(exe, &b_root, Peer::Joiner, tx);
 
     enter(&mut a, "1");
-    enter(&mut a, "yes");
     enter(&mut b, "2");
-    enter(&mut b, "yes");
 
     let mut invite = false;
     let mut reply = false;
-    let mut first_code: Option<String> = None;
-    let mut second_code: Option<String> = None;
-    let mut confirmed = false;
     let mut ready = [false; 2];
     let mut put_sent = false;
     let mut get_sent = false;
@@ -103,20 +101,6 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
                 reply = true;
             }
         }
-        if let Some((_, code)) = line.split_once("双方设备应显示相同的 6 位配对核对码：") {
-            match peer {
-                Peer::Creator => first_code = Some(code.trim().to_owned()),
-                Peer::Joiner => second_code = Some(code.trim().to_owned()),
-            }
-        }
-        if let (Some(one), Some(two)) = (&first_code, &second_code) {
-            if !confirmed {
-                assert_eq!(one, two, "ICE/manual TLS transcript comparison mismatch");
-                enter(&mut a, "yes");
-                enter(&mut b, "yes");
-                confirmed = true;
-            }
-        }
         if line.contains("已建立安全 P2P 连接") {
             ready[if peer == Peer::Creator { 0 } else { 1 }] = true;
         }
@@ -129,14 +113,20 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
             enter(&mut a, "help");
             enter(&mut a, "status");
             enter(&mut b, "status");
-            enter(&mut a, "put 原始.txt 收到.txt");
+            enter(&mut a, &format!(
+                "put \"{}\" \"{}\"", base.join("原始跨目录.txt").display(),
+                base.join("远端副本.txt").display(),
+            ));
             put_sent = true;
         }
         if put_sent && !get_sent && peer == Peer::Creator
             && line.contains("[PUT] 文件或目录任务完成")
         {
             enter(&mut a, "ls");
-            enter(&mut a, "get 收到.txt 回传.txt");
+            enter(&mut a, &format!(
+                "get \"{}\" \"{}\"", base.join("远端副本.txt").display(),
+                a_root.join("回传.txt").display(),
+            ));
             get_sent = true;
         }
         if get_sent && peer == Peer::Creator && line.contains("[文件] 已接收并验证") {
@@ -145,7 +135,7 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
         if line.contains("失败：") || line.contains("Transfer failed:") {
             let _ = a.kill();
             let _ = b.kill();
-            panic!("Go-style shell failed: {:?}", transcript);
+            panic!("Go-style shell failed on {peer:?}: {line:?}; earlier output: {transcript:?}");
         }
         let secret = line.contains("P2PR-INV2-") || line.contains("P2PR-REP2-");
         if transcript.len() < 100 {
@@ -157,7 +147,7 @@ fn no_arg_menu_and_persistent_put_list_get_on_real_ice_mtls_quic() {
     enter(&mut b, "quit");
     assert!(a.wait().unwrap().success());
     assert!(b.wait().unwrap().success());
-    assert_eq!(fs::read(b_root.join("收到.txt")).unwrap(), content.as_bytes());
+    assert_eq!(fs::read(base.join("远端副本.txt")).unwrap(), content.as_bytes());
     assert_eq!(fs::read(a_root.join("回传.txt")).unwrap(), content.as_bytes());
     fs::remove_dir_all(base).unwrap();
 }

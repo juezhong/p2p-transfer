@@ -5,6 +5,7 @@ use std::{sync::Mutex, time::{Duration, Instant}};
 
 #[derive(Clone, Debug)]
 pub struct ProgressSnapshot {
+    pub request_id: u64,
     pub direction: &'static str,
     pub file: String,
     pub written: u64,
@@ -32,6 +33,7 @@ impl ProgressSnapshot {
 }
 
 struct ActiveFile {
+    request_id: u64,
     direction: &'static str,
     file: String,
     written: u64,
@@ -46,9 +48,12 @@ pub struct TransferProgress {
 
 impl TransferProgress {
     pub fn begin(&self, direction: &'static str, file: String, total: u64) {
+        self.begin_id(0, direction, file, total);
+    }
+    pub fn begin_id(&self, request_id: u64, direction: &'static str, file: String, total: u64) {
         if let Ok(mut guard) = self.active.lock() {
             *guard = Some(ActiveFile {
-                direction, file, written: 0, total, started: Instant::now(),
+                request_id, direction, file, written: 0, total, started: Instant::now(),
             });
         }
     }
@@ -62,6 +67,7 @@ impl TransferProgress {
     }
     pub fn snapshot(&self) -> Option<ProgressSnapshot> {
         self.active.lock().ok()?.as_ref().map(|x| ProgressSnapshot {
+            request_id: x.request_id,
             direction: x.direction, file: x.file.clone(), written: x.written,
             total: x.total, elapsed: x.started.elapsed(),
         })

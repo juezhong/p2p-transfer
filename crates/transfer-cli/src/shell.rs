@@ -1,12 +1,14 @@
 //! Persistent bidirectional interactive shell resembling p2p-friend.
 //! File bytes travel exclusively on SDK Data QUIC; directory RPC and ACK
 //! use SDK Control QUIC. Only one local user-initiated task at a time.
-//! Recursive transfer, remote cancellation and resume are future gates.
+//! Recursive transfers and authenticated cross-peer cancellation are supported;
+//! interrupted chunk-level resume is a separate reliability gate.
 
 use std::{
     future::Future,
     collections::{HashMap, VecDeque},
     path::{Component, Path, PathBuf},
+    io::{self, Write, IsTerminal},
     time::Duration,
     sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc, Mutex as StdMutex},
     thread,
@@ -15,11 +17,12 @@ use std::{
 use tokio::{sync::{mpsc, oneshot, Mutex}, task::JoinHandle};
 use rustyline::{Editor, error::ReadlineError, history::DefaultHistory};
 use transfer_core::{
+    cancel::TransferCancels,
     lease::TransferLease,
     progress::{TransferProgress, ProgressSnapshot},
     recursive::{gather_directory, ManifestEntry},
     rpc::list_in_root,
-    sdk_quic::{acquire_transfer_via_sdk, release_transfer_via_sdk, list_typed_via_sdk, list_via_sdk, root_info_via_sdk, mkdir_via_sdk, request_get_via_sdk, send_via_managed_sdk_with_progress, serve_control_stream_with_lease_and_progress, IncomingResult, RemoteLeaseGrant},
+    sdk_quic::{acquire_transfer_via_sdk, release_transfer_via_sdk, list_typed_via_sdk, list_via_sdk, root_info_via_sdk, starting_directory_via_sdk, mkdir_via_sdk, request_get_via_sdk, cancel_transfer_via_sdk, send_via_managed_sdk_cancellable, serve_control_stream_cancellable, IncomingResult, RemoteLeaseGrant},
     secure_io::SharedRoot,
 };
 
@@ -51,18 +54,60 @@ pub(crate) fn root_relative(base: &Path, input: &str) -> CliResult<PathBuf> {
     Ok(components.iter().collect())
 }
 
+/// Accept explicit absolute paths only inside the session-authorized root.
+pub(crate) fn scoped_path(root: &Path, cwd: &Path, input: &str) -> CliResult<PathBuf> {
+    let path = Path::new(input);
+    if input == "/" { return Ok(PathBuf::new()); }
+    if path.is_absolute() {
+        // Windows canonicalize() often returns verbatim volume paths
+        // (\\\\?\\C:\\...), while std::env::temp_dir(), pasted commands
+        // and CLI arguments normally use DOS spelling (C:\\...).
+        // Both forms refer to the SAME volume. Strip using Path component
+        // boundaries rather than string prefix matching; still reject other
+        // drives and normalize parent navigation below.
+        #[cfg(windows)]
+        let ordinary_root = root.to_str()
+            .and_then(|text| text.strip_prefix(r"\\?\"))
+            .map(Path::new);
+        #[cfg(windows)]
+        let stripped = path.strip_prefix(root).or_else(|_| {
+            path.strip_prefix(ordinary_root.unwrap_or(root))
+        });
+        #[cfg(not(windows))]
+        let stripped = path.strip_prefix(root);
+        let stripped = stripped
+            .map_err(|_| format!("绝对路径不在本次授权目录 {} 下", root.display()))?;
+        return root_relative(Path::new(""), &stripped.to_string_lossy());
+    }
+    root_relative(cwd, input)
+}
+
+fn scoped_remote(root: Option<&str>, cwd: &Path, input: &str) -> CliResult<PathBuf> {
+    let root = root.ok_or("尚未取得对端文件系统范围，无法确认文件路径")?;
+    scoped_path(Path::new(root), cwd, input)
+}
+
+fn display_absolute(root: &Path, cwd: &Path) -> String {
+    root.join(cwd).display().to_string()
+}
+
 pub(crate) fn relative_string(path: &Path) -> CliResult<String> {
     path.to_str().map(str::to_owned).ok_or_else(|| "当前协议不支持非 UTF-8 路径".into())
 }
 
 fn help() {
-    println!("远端目录：pwd / ls [path] / cd <path|->");
-    println!("本地目录：lpwd / lls [path] / lcd <path|->");
-    println!("文件传输：put <local> [remote] / get <remote> [local]");
-    println!("其他：status / cancel / help / quit");
-    println!("Tab：支持命令、本地和远端中文路径补全，带空格路径自动加引号。");
-    println!("路径相对本次明确授权的目录根；路径中有空格请使用双引号。");
-    println!("实验限制：目录递归已接入；尚不支持断点续传及真正的远程取消协议。");
+    println!("───── P2P Transfer 文件命令 ─────");
+    println!("  pwd / ls [目录] / cd <目录|->    远端目录操作");
+    println!("  lpwd / lls [目录] / lcd <目录|-> 本机目录操作");
+    println!("  put <本机> [远端]                上传文件/目录");
+    println!("  get <远端> [本机]                下载文件/目录");
+    println!("  status                         Control、Data 及任务状态");
+    println!("  cancel / Ctrl-C                双端取消传输，不断开连接");
+    println!("  quit / exit                    关闭会话并退出");
+    println!("────────────────────────────────");
+    println!("路径可用中文/空格（用双引号）和 Tab 补全。");
+    println!("绝对路径按本机系统文件权限访问；Unix 可通过 cd .. 走出启动目录。");
+    println!("PUT/GET 占用前台直到结束；不支持断点续传。");
 }
 
 /// The next prompt is displayed only after the current command was printed.
@@ -139,6 +184,7 @@ async fn put_path(
     source: &Path,
     destination: &Path,
     progress: &TransferProgress,
+    cancels: &TransferCancels,
 ) -> CliResult<()> {
     let entries = match root.list(Some(source)) {
         Ok(_) => Some(gather_directory(root, source).map_err(|e| format!("{e:?}"))?),
@@ -157,8 +203,8 @@ async fn put_path(
                     mkdir_via_sdk(session, relative_string(&remote)?, next_id())
                         .await.map_err(|e| format!("{e:?}"))?;
                 } else {
-                    let receipt = send_via_managed_sdk_with_progress(
-                        session, lanes, root, path, &relative_string(&remote)?, next_id(), Some(progress)
+                    let receipt = send_via_managed_sdk_cancellable(
+                        session, lanes, root, (path, &relative_string(&remote)?), next_id(), Some(progress), cancels
                     ).await.map_err(|e| format!("{e:?}"))?;
                     println!("[PUT] {}: {} 字节已校验提交", remote.display(), receipt.bytes);
                 }
@@ -166,8 +212,8 @@ async fn put_path(
             Ok(())
         }
         None => {
-            let receipt = send_via_managed_sdk_with_progress(
-                session, lanes, root, source, &relative_string(destination)?, next_id(), Some(progress)
+            let receipt = send_via_managed_sdk_cancellable(
+                session, lanes, root, (source, &relative_string(destination)?), next_id(), Some(progress), cancels
             ).await.map_err(|e| format!("{e:?}"))?;
             println!("[PUT] {} 字节已由接收端校验并提交", receipt.bytes);
             Ok(())
@@ -292,12 +338,59 @@ fn print_progress(p: &ProgressSnapshot) {
     let rate = p.bytes_per_second() / (1024.0 * 1024.0);
     let eta = p.eta().map(|d| format!("{}s", d.as_secs()))
         .unwrap_or_else(|| "计算中".to_owned());
-    println!(
-        "[{}] {}: {:.1}% / {} MiB / {} MiB / {:.2} MiB/s / 已用 {}s / 剩余 {}",
+    let msg = format!(
+        "[{}] {} {:5.1}%  {}/{} MiB  {:.2} MiB/s  已用 {}s  剩余 {}",
         p.direction, p.file, p.percent(),
         p.written / 1_048_576, p.total / 1_048_576,
         rate, p.elapsed.as_secs(), eta,
     );
+    if io::stdout().is_terminal() {
+        print!("\r\x1b[2K{msg}");
+        let _ = io::stdout().flush();
+    } else {
+        println!("{msg}");
+    }
+}
+
+async fn cancel_current(
+    session: &dyn AuthenticatedSession,
+    worker: &mut Option<JoinHandle<()>>,
+    batch: &mut Option<u64>,
+    is_creator: bool,
+    pending: &PendingDownloads,
+    progress: &TransferProgress,
+    registry: &TransferCancels,
+) -> bool {
+    // Collect IDs before abort: the GET guard removes pending state on Drop.
+    let mut ids: Vec<u64> = pending.lock().await.keys().copied().collect();
+    if let Some(p) = progress.snapshot() {
+        if p.request_id != 0 && !ids.contains(&p.request_id) {
+            ids.push(p.request_id);
+        }
+    }
+    let mut interrupted = false;
+    if let Some(handle) = worker.take() {
+        if !handle.is_finished() { interrupted = true; handle.abort(); }
+        let _ = handle.await;
+    }
+    for id in ids {
+        interrupted = true;
+        registry.cancel(id);
+        match tokio::time::timeout(Duration::from_secs(5),
+            cancel_transfer_via_sdk(session, id)).await
+        {
+            Ok(Ok(())) => println!("\n[CANCEL] 对端已确认停止文件任务 {id}"),
+            _ => eprintln!("\n[CANCEL] 对端取消确认超时或失败（任务 {id}）"),
+        }
+    }
+    if let Some(id) = batch.take() {
+        if !is_creator {
+            let _ = tokio::time::timeout(Duration::from_secs(4),
+                release_transfer_via_sdk(session, id)).await;
+        }
+    }
+    progress.clear();
+    interrupted
 }
 
 /// Always clean up auxiliary managers and the SDK transport on all exits.
@@ -324,25 +417,72 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let (prompt_ready, ready_rx) = std::sync::mpsc::channel();
     let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
-    let prompt_label = Arc::new(StdMutex::new("p2p[remote:/]> ".to_owned()));
+    let prompt_label = Arc::new(StdMutex::new("远端路径同步中> ".to_owned()));
     help();
-    input_thread(tx, ready_rx, completion_tx, Arc::clone(&prompt_label));
-    let mut local_cwd = PathBuf::new();
+    // Defer the first input prompt until the peer's real startup directory
+    // has been resolved over authenticated Control RPC. Otherwise a fast
+    // typist could accidentally run "ls" against "/" before synchronization.
+    let mut initial_input = Some((tx, ready_rx, completion_tx));
+    let mut local_cwd = root.starting_relative()
+        .map_err(|err| format!("初始目录不在本机访问范围内：{err:?}"))?;
     let mut remote_cwd = PathBuf::new();
-    let mut previous_local = PathBuf::new();
+    let mut previous_local = local_cwd.clone();
     let mut previous_remote = PathBuf::new();
     let mut task: Option<JoinHandle<()>> = None;
     let mut active_batch_id: Option<u64> = None;
     let mut pending_prompt: Option<PromptReady> = None;
     let progress = Arc::new(TransferProgress::default());
+    let cancels = Arc::new(TransferCancels::default());
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut disconnected = false;
     let mut remote_root: Option<String> = None;
+    let (root_tx, mut root_rx) = mpsc::unbounded_channel::<(String, String)>();
+    let mut root_fetch_finished = false;
+    let session_for_root = Arc::clone(&session);
+    tokio::spawn(async move {
+        // Both peers enter their Control accept loop before this resolves.
+        // Root is the accessible filesystem scope (e.g. "/"); startup cwd
+        // is a DIFFERENT path to display in the shell and use by default.
+        if let Ok(Ok((scope, start))) = tokio::time::timeout(
+            Duration::from_secs(8),
+            async {
+                tokio::try_join!(
+                    root_info_via_sdk(&session_for_root, next_id()),
+                    starting_directory_via_sdk(&session_for_root, next_id()),
+                )
+            },
+        ).await {
+            let _ = root_tx.send((scope, start));
+        }
+    });
     let mut incoming_workers = tokio::task::JoinSet::new();
 
     loop {
         tokio::select! {
+            root_message = root_rx.recv(), if !root_fetch_finished => {
+                root_fetch_finished = true;
+                if let Some((scope, initial)) = root_message {
+                    let relative = Path::new(&initial).strip_prefix(&scope).ok()
+                        .and_then(|path| root_relative(Path::new(""), &path.to_string_lossy()).ok());
+                    if let Some(relative) = relative {
+                        previous_remote = relative.clone();
+                        remote_cwd = relative;
+                        println!("\n[目录] 对端初始目录：{initial}");
+                        if let Ok(mut prompt) = prompt_label.lock() {
+                            *prompt = format!("{}> ", display_absolute(Path::new(&scope), &remote_cwd));
+                        }
+                        remote_root = Some(scope);
+                    } else {
+                        eprintln!("[目录] 对端初始目录不在有效共享范围内，拒绝目录同步");
+                    }
+                } else {
+                    eprintln!("[目录] 无法取得对端初始工作目录；请确认双方使用兼容版本");
+                }
+                if let Some((sender, ready, queries)) = initial_input.take() {
+                    input_thread(sender, ready, queries, Arc::clone(&prompt_label));
+                }
+            }
             query = completion_rx.recv() => {
                 if let Some(query) = query {
                     // Tab RPC 不能阻塞本机 Control accept loop，否则双方
@@ -397,13 +537,14 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let arbiter = arbiter.clone();
                         let remote_grant = Arc::clone(&remote_grant);
                         let progress = Arc::clone(&progress);
+                        let cancels = Arc::clone(&cancels);
                         incoming_workers.spawn(async move {
                             // Separate control RPCs may remain usable while
                             // a data task is running; the protocol dispatcher
                             // never passes file bytes on Control QUIC.
                             let auth = if is_creator { Some((&arbiter, &remote_grant)) } else { None };
-                            match serve_control_stream_with_lease_and_progress(
-                                &session, &root, send, recv, auth, Some(&lanes), Some(&progress),
+                            match serve_control_stream_cancellable(
+                                &session, &root, (send, recv), auth, Some(&lanes), Some(&progress), Some(&cancels),
                             ).await {
                                 Ok(IncomingResult::Received(receipt)) => {
                                     println!("\n[文件] 已接收并验证 {} 字节（SHA-256 OK）", receipt.bytes);
@@ -415,6 +556,10 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                                     println!("\n[GET] 已回传 {} 字节", receipt.bytes);
                                 }
                                 Ok(IncomingResult::DirectoryListed) => {}
+                                Err(transfer_core::sdk_quic::SdkTransferError::Cancelled) => {
+                                    progress.clear();
+                                    println!("\n[CANCEL] 该文件任务已由一端取消，Data 流已停止");
+                                },
                                 Err(err) => {
                                     if session.control().close_reason().is_none() {
                                         eprintln!("\n[远端请求] 处理失败：{err:?}");
@@ -460,61 +605,83 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                     }
                     "help" | "?" => help(),
                     "status" => {
-                        let links = data_lanes.available().await;
-                        let actual = links.len();
-                        println!("已认证 Data QUIC 活跃连接：{}/4", actual);
-                        println!("角色={}；Control QUIC={}；认证 Data QUIC={}；UDP {} -> {}",
-                            peer.role,
-                            if session.control().close_reason().is_none() { "connected" } else { "closed" },
-                            if actual > 0 { "connected" } else { "reconnecting" },
-                            peer.local_address, peer.peer_address);
                         let d = session.diagnostic();
-                        println!("=== 会话状态 ===");
-                        println!("Control: 本地={} / 对端={} / 本端拨号={} / ICE={:?} / 对端候选={:?}",
-                            d.actual_local_udp, d.actual_remote_udp, d.control_outbound,
-                            d.ice_role, d.remote_candidate_kind);
-                        println!("STUN 一致性={:?}；网关映射={:?}；网关方式={:?}",
-                            d.stun_consistency, d.gateway_mapping, d.gateway_method);
-                        println!("信令阶段 UDP 候选: {:?}", d.offered_host_candidates);
-                        println!("已认证 prflx 地址: {:?}", d.authenticated_peer_reflexive);
-                        for lane in data_lanes.statuses().await {
-                            println!(
-                                "Data QUIC #{}: phase={:?} / generation={} / id={:?} / local IP={:?} / remote UDP={:?} / error={:?}",
-                                lane.index, lane.phase, lane.generation, lane.connection_id,
-                                lane.local_ip, lane.remote_udp, lane.last_error,
-                            );
-                        }
+                        let lanes = data_lanes.statuses().await;
+                        let connected = lanes.iter()
+                            .filter(|lane| matches!(
+                                lane.phase,
+                                p2p_sdk::transport_session::ManagedLinkPhase::Connected,
+                            )).count();
                         if remote_root.is_none() {
                             if let Ok(Ok(path)) = tokio::time::timeout(
-                                Duration::from_secs(3), root_info_via_sdk(&session, next_id())
+                                Duration::from_secs(3),
+                                root_info_via_sdk(&session, next_id()),
                             ).await { remote_root = Some(path); }
                         }
-                        println!("本机实际授权目录: {}", root.display_root().display());
-                        println!("对端实际授权目录: {}",
-                            remote_root.as_deref().unwrap_or("未取得（RPC 超时或对端版本不兼容）"));
+                        println!("\n══════════ 会话状态 ══════════");
+                        println!("  设备角色    {}", peer.role);
+                        println!("  Control     {} / {}",
+                            if session.control().close_reason().is_none() {
+                                "已连接"
+                            } else { "已断开" },
+                            if d.control_outbound { "主动拨号" } else { "被动接入" });
+                        println!("  本机 UDP    {}", d.actual_local_udp);
+                        println!("  对端 UDP    {}", d.actual_remote_udp);
+                        println!("  ICE         {:?} / 对端候选 {}",
+                            d.ice_role, format!("{:?}", d.remote_candidate_kind)
+                                .replace("Some(", "").replace(')', ""));
+                        println!("  STUN        {:?} / 网关 {:?} {:?}",
+                            d.stun_consistency, d.gateway_method, d.gateway_mapping);
+                        println!("  UDP 候选    {:?}", d.offered_host_candidates);
+                        println!("  认证 prflx  {:?}", d.authenticated_peer_reflexive);
+                        println!("────────── Data QUIC ({connected}/{}) ──────────", lanes.len());
+                        for lane in lanes {
+                            println!("  #{} {:?}  代次 {}  ID {:?}",
+                                lane.index, lane.phase, lane.generation, lane.connection_id);
+                            println!("      本机IP {:?}  对端UDP {:?}  错误 {:?}",
+                                lane.local_ip, lane.remote_udp, lane.last_error);
+                        }
+                        println!("────────── 已授权目录 ──────────");
+                        println!("  本机共享根  {}", root.display_root().display());
+                        println!("  对端共享根  {}", remote_root.as_deref().unwrap_or("尚未取得"));
+                        println!("  本机当前    {}", display_absolute(root.display_root(), &local_cwd));
+                        println!("  对端当前    {}", display_absolute(
+                            Path::new(remote_root.as_deref().unwrap_or("")), &remote_cwd
+                        ));
+                        println!("────────── 文件任务 ──────────");
                         let remote_id = remote_grant.lock().await.active_request();
                         if let Some(id) = remote_id {
-                            println!("文件传输租约: BUSY / 发起方=对端 / request_id={id}");
+                            println!("  租约        忙碌（对端发起，批次 {id}）");
                         } else if let Some(id) = arbiter.active_request() {
-                            println!("文件传输租约: BUSY / 发起方=本机 / request_id={id}");
+                            println!("  租约        忙碌（本机发起，批次 {id}）");
                         } else {
-                            println!("文件传输租约: IDLE");
+                            println!("  租约        空闲");
                         }
-                        if let Some(snapshot) = progress.snapshot() { print_progress(&snapshot); }
-                        println!("本地任务活动={}；本机相对目录=/{}；远端相对目录=/{}",
-                            active.load(Ordering::SeqCst), local_cwd.display(), remote_cwd.display());
+                        println!("  本机命令    {}", if active.load(Ordering::SeqCst) {
+                            "执行中"
+                        } else { "空闲" });
+                        if let Some(snapshot) = progress.snapshot() {
+                            println!("  文件 ID     {}", snapshot.request_id);
+                            print_progress(&snapshot);
+                            if io::stdout().is_terminal() { println!(); }
+                        } else {
+                            println!("  文件        无进行中进度");
+                        }
+                        println!("══════════════════════════════");
                     }
-                    "pwd" if args.len() == 1 => println!("/{}", remote_cwd.display()),
-                    "lpwd" if args.len() == 1 => println!("/{}", local_cwd.display()),
+                    "pwd" if args.len() == 1 => println!("{}", display_absolute(
+                        Path::new(remote_root.as_deref().unwrap_or("")), &remote_cwd
+                    )),
+                    "lpwd" if args.len() == 1 => println!("{}", display_absolute(root.display_root(), &local_cwd)),
                     "lls" if args.len() <= 2 => {
-                        let p = root_relative(&local_cwd, args.get(1).map(String::as_str).unwrap_or("."))?;
+                        let p = scoped_path(root.display_root(), &local_cwd, args.get(1).map(String::as_str).unwrap_or("."))?;
                         match list_in_root(&root, &relative_string(&p)?) {
                             Ok(names) => for name in names { println!("{name}"); },
                             Err(err) => println!("[LLS] {err:?}"),
                         }
                     }
                     "ls" if args.len() <= 2 => {
-                        let p = root_relative(&remote_cwd, args.get(1).map(String::as_str).unwrap_or("."))?;
+                        let p = scoped_remote(remote_root.as_deref(), &remote_cwd, args.get(1).map(String::as_str).unwrap_or("."))?;
                         match list_via_sdk(&session, relative_string(&p)?, next_id()).await {
                             Ok(names) => for name in names { println!("{name}"); },
                             Err(err) => println!("[LS] {err:?}"),
@@ -522,7 +689,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                     }
                     "lcd" if args.len() == 2 => {
                         let path = if args[1] == "-" { previous_local.clone() }
-                            else { root_relative(&local_cwd, &args[1])? };
+                            else { scoped_path(root.display_root(), &local_cwd, &args[1])? };
                         match list_in_root(&root, &relative_string(&path)?) {
                             Ok(_) => { previous_local = std::mem::replace(&mut local_cwd, path); }
                             Err(err) => println!("[LCD] {err:?}"),
@@ -530,22 +697,24 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                     }
                     "cd" if args.len() == 2 => {
                         let path = if args[1] == "-" { previous_remote.clone() }
-                            else { root_relative(&remote_cwd, &args[1])? };
+                            else { scoped_remote(remote_root.as_deref(), &remote_cwd, &args[1])? };
                         match list_via_sdk(&session, relative_string(&path)?, next_id()).await {
                             Ok(_) => {
                                 previous_remote = std::mem::replace(&mut remote_cwd, path);
                                 if let Ok(mut prompt) = prompt_label.lock() {
-                                    *prompt = format!("p2p[remote:/{}]> ", remote_cwd.display());
+                                    *prompt = format!("{}> ", display_absolute(
+                                            Path::new(remote_root.as_deref().unwrap_or("")), &remote_cwd
+                                        ));
                                 }
                             }
                             Err(err) => println!("[CD] {err:?}"),
                         }
                     }
                     "put" if (2..=3).contains(&args.len()) => {
-                        let source = root_relative(&local_cwd, &args[1])?;
+                        let source = scoped_path(root.display_root(), &local_cwd, &args[1])?;
                         let suggested = source.file_name()
                             .ok_or("请输入有效的文件路径")?.to_string_lossy().to_string();
-                        let remote = root_relative(&remote_cwd, args.get(2).map(String::as_str).unwrap_or(&suggested))?;
+                        let remote = scoped_remote(remote_root.as_deref(), &remote_cwd, args.get(2).map(String::as_str).unwrap_or(&suggested))?;
                         if active.swap(true, Ordering::SeqCst) {
                             println!("[PUT] 当前已有文件任务");
                             continue;
@@ -556,12 +725,13 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let activity = Arc::clone(&active);
                         let lease = arbiter.clone();
                         let progress = Arc::clone(&progress);
+                        let cancels = Arc::clone(&cancels);
                         progress.clear();
                         let batch_id = next_id();
                         active_batch_id = Some(batch_id);
                         task = Some(tokio::spawn(async move {
                             let result = with_batch_lease(&session, &lease, is_creator, batch_id,
-                                put_path(&session, &lanes, &root, &source, &remote, &progress)).await;
+                                put_path(&session, &lanes, &root, &source, &remote, &progress, &cancels)).await;
                             match result {
                                 Ok(()) => println!("\n[PUT] 文件或目录任务完成"),
                                 Err(err) => eprintln!("\n[PUT] 失败：{err}"),
@@ -571,10 +741,10 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         pending_prompt = prompt_guard.take();
                     }
                     "get" if (2..=3).contains(&args.len()) => {
-                        let src = root_relative(&remote_cwd, &args[1])?;
+                        let src = scoped_remote(remote_root.as_deref(), &remote_cwd, &args[1])?;
                         let suggested = src.file_name()
                             .ok_or("请输入有效的文件路径")?.to_string_lossy().to_string();
-                        let local = root_relative(&local_cwd, args.get(2).map(String::as_str).unwrap_or(&suggested))?;
+                        let local = scoped_path(root.display_root(), &local_cwd, args.get(2).map(String::as_str).unwrap_or(&suggested))?;
                         let source = relative_string(&src)?;
                         let destination = relative_string(&local)?;
                         if active.swap(true, Ordering::SeqCst) {
@@ -604,27 +774,16 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         pending_prompt = prompt_guard.take();
                     }
                     "cancel" if args.len() == 1 => {
-                        if let Some(handle) = task.take() {
-                            if !handle.is_finished() {
-                                handle.abort();
-                                if !is_creator {
-                                    if let Some(id) = active_batch_id.take() {
-                                        let session = Arc::clone(&session);
-                                        tokio::spawn(async move {
-                                            let _ = handle.await;
-                                            let _ = release_transfer_via_sdk(&session, id).await;
-                                        });
-                                    }
-                                }
-                                active.store(false, Ordering::SeqCst);
-                                progress.clear();
-                                pending_prompt.take();
-                                println!("[CANCEL] 已中止本地任务；Control QUIC 保持连接");
-                            } else {
-                                println!("[CANCEL] 当前没有正在运行的本地任务");
-                            }
+                        let was_running = cancel_current(
+                            &session, &mut task, &mut active_batch_id,
+                            is_creator, &pending_downloads, &progress, &cancels,
+                        ).await;
+                        if was_running {
+                            active.store(false, Ordering::SeqCst);
+                            pending_prompt.take();
+                            println!("[CANCEL] 双端任务已取消，会话保持连接");
                         } else {
-                            println!("[CANCEL] 当前没有可直接中止的本地任务");
+                            println!("[CANCEL] 当前没有活动的文件任务");
                         }
                     }
                     _ => println!("命令不支持或参数错误；输入 help"),
@@ -633,23 +792,16 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
             interrupt = tokio::signal::ctrl_c() => {
                 match interrupt {
                     Ok(()) => {
-                        if let Some(handle) = task.take() {
-                            handle.abort();
-                            if !is_creator {
-                                if let Some(id) = active_batch_id.take() {
-                                    let session = Arc::clone(&session);
-                                    tokio::spawn(async move {
-                                        let _ = handle.await;
-                                        let _ = release_transfer_via_sdk(&session, id).await;
-                                    });
-                                }
-                            }
-                            active.store(false, Ordering::SeqCst);
-                            progress.clear();
-                            pending_prompt.take();
-                            println!("\n[CANCEL] 当前本地任务已中断，会话仍然保持");
+                        let stopped = cancel_current(
+                            &session, &mut task, &mut active_batch_id,
+                            is_creator, &pending_downloads, &progress, &cancels,
+                        ).await;
+                        active.store(false, Ordering::SeqCst);
+                        pending_prompt.take();
+                        if stopped {
+                            println!("\n[CANCEL] 双端文件任务已经取消，会话继续保持");
                         } else {
-                            println!("\n没有活动的本地发送任务，输入 quit 退出");
+                            println!("\n[CANCEL] 当前没有正在进行的传输，输入 quit 可退出");
                         }
                     }
                     Err(_) => return Err("无法监听 Ctrl-C".into()),
@@ -669,5 +821,22 @@ mod tests {
         assert_eq!(root_relative(&root, "/").unwrap(), PathBuf::new());
         assert!(root_relative(Path::new(""), "../../escape").is_err());
         assert!(root_relative(Path::new(""), "/etc/passwd").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_paths_are_scoped_to_explicit_share_root() {
+        let root = Path::new("/home/test/approved");
+        assert_eq!(
+            scoped_path(root, Path::new("folder"), "/home/test/approved/file.bin").unwrap(),
+            PathBuf::from("file.bin"),
+        );
+        assert!(scoped_path(root, Path::new(""), "/etc/passwd").is_err());
+        assert_eq!(
+            scoped_path(Path::new("/"), Path::new(""), "/etc/hosts").unwrap(),
+            PathBuf::from("etc/hosts"),
+        );
+        assert!(scoped_remote(None, Path::new(""), "/outside").is_err());
+        assert!(scoped_remote(None, Path::new(""), "relative").is_err());
     }
 }

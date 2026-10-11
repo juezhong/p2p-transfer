@@ -174,7 +174,7 @@ where
     let mut file = root.open_read(source)?;
     let bytes = file.metadata()?.len();
     if let Some(p) = progress {
-        p.begin("发送", source.display().to_string(), bytes);
+        p.begin_id(request_id, "发送", source.display().to_string(), bytes);
     }
     let mut hasher = Sha256::new();
     let mut buf = [0u8; CHUNK];
@@ -277,7 +277,7 @@ where
             return Err(err);
         }
     };
-    if let Some(p) = progress { p.begin("接收", offer.destination.clone(), offer.bytes); }
+    if let Some(p) = progress { p.begin_id(request_id, "接收", offer.destination.clone(), offer.bytes); }
     let mut sink = match root.receive_part(Path::new(&offer.destination), offer.bytes) {
         Ok(sink) => sink,
         Err(err) => {

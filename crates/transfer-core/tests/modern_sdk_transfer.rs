@@ -8,8 +8,12 @@ use std::{path::Path, sync::Arc, time::Duration};
 use p2p_sdk::{direct_peer::{begin_creator, begin_joiner}, transport_session::ConnectedTransportPeer};
 use transfer_core::{
     modern_data_lanes::ModernDataLanes,
+    cancel::{TransferCancels, canceled},
     progress::TransferProgress,
-    sdk_quic::{list_via_sdk, root_info_via_sdk, serve_control_stream, send_via_managed_sdk_with_progress,
+    sdk_quic::{list_via_sdk, root_info_via_sdk, starting_directory_via_sdk,
+        cancel_transfer_via_sdk,
+        serve_control_stream, serve_control_stream_cancellable, request_get_via_sdk,
+        SdkTransferError, send_via_managed_sdk_with_progress,
         serve_control_stream_with_lease, ControlIo, IncomingResult},
     secure_io::SharedRoot,
     stream_transfer::{receive_file, send_file, TransferReceipt},
@@ -186,6 +190,23 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                         std::fs::canonicalize(dir.join("B")).unwrap().to_str().unwrap(),
                     );
 
+                    // Interactive CLI has a broader filesystem scope than
+                    // its launch cwd. Verify authenticated Control reports
+                    // the actual launch directory, not the filesystem root.
+                    let interactive_root = SharedRoot::for_interactive_shell(&dir.join("B")).unwrap();
+                    let (initial, answered) = tokio::join!(
+                        starting_directory_via_sdk(&creator, 16),
+                        async {
+                            let (send, recv) = joiner.control.accept_bi().await.unwrap();
+                            serve_control_stream(&joiner, &interactive_root, send, recv).await
+                        }
+                    );
+                    assert!(matches!(answered.unwrap(), IncomingResult::DirectoryListed));
+                    assert_eq!(
+                        initial.unwrap(),
+                        std::fs::canonicalize(dir.join("B")).unwrap().to_str().unwrap(),
+                    );
+
                     // Test the production Transfer code path with SDK-managed,
                     // independently authenticated Data streams and a real
                     // Control RPC dispatcher (not raw test streams).
@@ -214,6 +235,62 @@ fn sdk_high_level_manual_session_transfers_bidirectional_files() {
                         std::fs::read(dir.join("B/第二份.txt")).unwrap(),
                         payload.as_bytes(),
                     );
+
+                    // Independent cancellation RPC on authenticated Control
+                    // retains the target ID even when it arrives before the
+                    // corresponding GET/PUT send starts.
+                    let cancellations = TransferCancels::default();
+                    let (ack, served) = tokio::join!(
+                        cancel_transfer_via_sdk(&creator, 23),
+                        async {
+                            let (send, recv) = joiner.control.accept_bi().await.unwrap();
+                            serve_control_stream_cancellable(
+                                &joiner, &destination, (send, recv), None, Some(&joiner_pool),
+                                None, Some(&cancellations),
+                            ).await
+                        },
+                    );
+                    ack.unwrap();
+                    assert!(matches!(served.unwrap(), IncomingResult::DirectoryListed));
+                    let (_guard, rx) = cancellations.register(23).unwrap();
+                    tokio::time::timeout(Duration::from_secs(1), canceled(rx)).await.unwrap();
+                    // Active remote GET: the responder enters its real Data
+                    // send path and waits for a disk ACK. A CANCEL on a separate
+                    // authenticated Control stream MUST terminate that sender
+                    // promptly, without closing the Control connection.
+                    let in_flight_cancels = TransferCancels::default();
+                    let (_, (transfer, canceled_rpc)) =
+                        tokio::time::timeout(Duration::from_secs(15), async {
+                            tokio::join!(
+                                async {
+                                    request_get_via_sdk(
+                                        &creator, "empty.bin".into(),
+                                        "should-never-complete.bin".into(), 26,
+                                    ).await.unwrap();
+                                    cancel_transfer_via_sdk(&creator, 26).await.unwrap();
+                                },
+                                async {
+                                    let (send, recv) =
+                                        joiner.control.accept_bi().await.unwrap();
+                                    tokio::join!(
+                                        serve_control_stream_cancellable(
+                                            &joiner, &destination, (send, recv), None,
+                                            Some(&joiner_pool), None, Some(&in_flight_cancels),
+                                        ),
+                                        async {
+                                            let (send, recv) =
+                                                joiner.control.accept_bi().await.unwrap();
+                                            serve_control_stream_cancellable(
+                                                &joiner, &destination, (send, recv), None,
+                                                Some(&joiner_pool), None, Some(&in_flight_cancels),
+                                            ).await
+                                        }
+                                    )
+                                }
+                            )
+                        }).await.expect("remote GET sender ignored authenticated cancel");
+                    assert!(matches!(transfer, Err(SdkTransferError::Cancelled)));
+                    assert!(matches!(canceled_rpc.unwrap(), IncomingResult::DirectoryListed));
 
                     creator_pool.shutdown().await;
                     joiner_pool.shutdown().await;
