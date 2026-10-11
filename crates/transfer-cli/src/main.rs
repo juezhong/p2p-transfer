@@ -7,6 +7,7 @@
 mod completion;
 mod interactive;
 mod shell;
+mod terminal;
 
 use std::{
     io::{self, Write},
