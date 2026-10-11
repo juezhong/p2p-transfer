@@ -46,7 +46,7 @@ fn help() {
            put <local> [remote] 上传文件或目录\n\
            get <remote> [local] 下载文件或目录\n\
            status / cancel / help / quit\n\
-         文件访问限定于本次明确授权的共享根目录；无文件数据中继。\n\
+         可通过绝对路径访问系统账户允许的文件；无文件数据中继。\n\
          TUI/GUI、完整故障恢复和公网 NAT 验证仍在开发。",
         env!("CARGO_PKG_VERSION")
     );

@@ -2090,8 +2090,9 @@ dependencies = [
 
 [[package]]
 name = "transfer-cli"
-version = "0.1.0-test.6"
+version = "0.1.0-test.7"
 dependencies = [
+ "libc",
  "p2p-sdk",
  "quinn",
  "rcgen",
@@ -2100,6 +2101,7 @@ dependencies = [
  "shell-words",
  "tokio",
  "transfer-core",
+ "unicode-width",
 ]
 
 [[package]]

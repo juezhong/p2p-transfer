@@ -75,6 +75,15 @@ impl TransferProgress {
     pub fn clear(&self) {
         if let Ok(mut guard) = self.active.lock() { *guard = None; }
     }
+    /// A completed file may clear only its own progress. Prevents a late
+    /// previous-request error from erasing the next file's live snapshot.
+    pub fn clear_request(&self, request_id: u64) {
+        if let Ok(mut guard) = self.active.lock() {
+            if guard.as_ref().is_some_and(|x| x.request_id == request_id) {
+                *guard = None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

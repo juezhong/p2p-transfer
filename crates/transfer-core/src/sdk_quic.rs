@@ -69,7 +69,7 @@ use crate::{data_lane_pool::ResilientDataLanes, modern_data_lanes::ModernDataLan
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::{
-    cancel::{TransferCancels, canceled},
+    cancel::{TransferCancels, canceled, finished},
     lease::LeaseGuard,
     progress::TransferProgress,
     protocol::{FrameKind, Frame},
@@ -264,11 +264,13 @@ pub async fn send_via_managed_sdk_cancellable(
     let (source, remote_destination) = paths;
     let (_guard, rx) = cancels.register(request_id)
         .ok_or(SdkTransferError::InvalidDataStream)?;
-    tokio::select! {
+    let result = tokio::select! {
         biased;
         () = canceled(rx) => Err(SdkTransferError::Cancelled),
         result = send_on_managed_lane(session, Some(lanes), root, source, remote_destination, request_id, progress) => result,
-    }
+    };
+    if let Some(p) = progress { p.clear_request(request_id); }
+    result
 }
 
 async fn send_on_managed_lane(
@@ -556,16 +558,19 @@ pub async fn serve_control_stream_cancellable(
             if let Some(registry) = cancels {
                 let (_guard, rx) = registry.register(id)
                     .ok_or(SdkTransferError::InvalidDataStream)?;
-                tokio::select! {
+                let result = tokio::select! {
                     biased;
                     () = canceled(rx) => Err(SdkTransferError::Cancelled),
                     received = async {
                         let mut data = read_data_preface(session, lanes, id).await?;
                         receive_file_after_offer_with_progress(
                             first, &mut control, &mut data, root, progress,
-                        ).await.map_err(SdkTransferError::from)
-                    } => Ok(IncomingResult::Received(received?)),
-                }
+                        ).await.map(|receipt| IncomingResult::Received(receipt))
+                            .map_err(SdkTransferError::from)
+                    } => received,
+                };
+                if let Some(p) = progress { p.clear_request(id); }
+                result
             } else {
                 let mut data = read_data_preface(session, lanes, id).await?;
                 Ok(IncomingResult::Received(
@@ -638,11 +643,33 @@ pub async fn serve_control_stream_cancellable(
                     // Only authenticated session peers can issue this RPC.
                     // Unknown IDs install a bounded tombstone: cancel-before-
                     // offer cannot resurrect the transfer.
-                    let accepted = cancels.is_some_and(|r| r.cancel(request_id));
-                    if accepted {
-                        write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
+                    let (accepted, completion) = cancels.map_or(
+                        (false, None), |registry| registry.cancel_with_completion(request_id)
+                    );
+                    if !accepted {
+                        write_frame(&mut control, FrameKind::Error, request_id,
+                            b"cancel unsupported".to_vec()).await?;
+                    } else if let Some(completion) = completion {
+                        // ACK "OK" means the sender/receiver task has actually
+                        // dropped its cancellation guard, not just read the RPC.
+                        if matches!(tokio::time::timeout(Duration::from_secs(8),
+                            finished(completion)).await, Ok(true))
+                        {
+                            write_frame(&mut control, FrameKind::RpcResponse, request_id,
+                                b"STOPPED".to_vec()).await?;
+                        } else {
+                            write_frame(&mut control, FrameKind::Error, request_id,
+                                b"cancel not stopped".to_vec()).await?;
+                        }
+                    } else if cancels.is_some_and(|r| r.was_finished(request_id)) {
+                        // The file finished just before its cancellation RPC.
+                        write_frame(&mut control, FrameKind::RpcResponse, request_id,
+                            b"STOPPED".to_vec()).await?;
                     } else {
-                        write_frame(&mut control, FrameKind::Error, request_id, b"cancel unsupported".to_vec()).await?;
+                        // Unknown or not-yet-started request: a bounded
+                        // tombstone is recorded, not a completed transfer.
+                        write_frame(&mut control, FrameKind::RpcResponse, request_id,
+                            b"PENDING".to_vec()).await?;
                     }
                     Ok(IncomingResult::DirectoryListed)
                 }
@@ -714,13 +741,25 @@ pub async fn serve_control_stream_cancellable(
                         let (_guard, rx) = registry.register(request_id)
                             .ok_or(SdkTransferError::InvalidDataStream)?;
                         write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
-                        tokio::select! {
+                        let result = tokio::select! {
                             biased;
                             () = canceled(rx) => Err(SdkTransferError::Cancelled),
                             sent = send_on_managed_lane(
                                 session, lanes, root, Path::new(&source), &destination, request_id, progress,
-                            ) => Ok(IncomingResult::ServedGet(sent?)),
-                        }
+                            ) => sent.map(IncomingResult::ServedGet).or_else(|err| {
+                                // A peer may send STOP_SENDING(0) just before
+                                // its CANCEL RPC arrives on another Control stream.
+                                // A stopped file stream is a task cancellation,
+                                // not a Control/Data transport failure.
+                                if matches!(&err, SdkTransferError::Transfer(
+                                    TransferError::Io(io_err)
+                                ) if io_err.kind() == io::ErrorKind::ConnectionReset) {
+                                    Err(SdkTransferError::Cancelled)
+                                } else { Err(err) }
+                            }),
+                        };
+                        if let Some(p) = progress { p.clear_request(request_id); }
+                        result
                     } else {
                         write_frame(&mut control, FrameKind::RpcResponse, request_id, b"OK".to_vec()).await?;
                         Ok(IncomingResult::ServedGet(
@@ -849,14 +888,20 @@ pub async fn acquire_transfer_via_sdk(
 
 /// Send authenticated request-ID cancellation before dropping the file
 /// receive future. Remote sender will halt and release file/data resources.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CancelAck { Stopped, Pending }
+
 pub async fn cancel_transfer_via_sdk(
     session: &dyn AuthenticatedSession,
     request_id: u64,
-) -> Result<(), SdkTransferError> {
+) -> Result<CancelAck, SdkTransferError> {
     if request_id == 0 { return Err(SdkTransferError::InvalidDataStream); }
     let response = request_rpc(session, RpcRequest::CancelTransfer, request_id).await?;
-    if response.payload != b"OK" { return Err(SdkTransferError::InvalidDataStream); }
-    Ok(())
+    match response.payload.as_slice() {
+        b"STOPPED" => Ok(CancelAck::Stopped),
+        b"PENDING" => Ok(CancelAck::Pending),
+        _ => Err(SdkTransferError::InvalidDataStream),
+    }
 }
 
 pub async fn release_transfer_via_sdk(
