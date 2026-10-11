@@ -411,9 +411,9 @@ async fn cancel_current(
     is_creator: bool,
     pending: &PendingDownloads,
     progress: &TransferProgress,
-    registry: &TransferCancels,
-    cancel_in_flight: &Arc<AtomicBool>,
+    cancellation: (&TransferCancels, &Arc<AtomicBool>),
 ) -> bool {
+    let (registry, cancel_in_flight) = cancellation;
     let mut ids: Vec<u64> = registry.active_ids();
     for id in pending.lock().await.keys().copied() {
         if !ids.contains(&id) { ids.push(id); }
@@ -891,8 +891,8 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         cancelling.store(true, Ordering::SeqCst);
                         let was_running = cancel_current(
                             &session, &mut task, &mut active_batch_id,
-                            is_creator, &pending_downloads, &progress, &cancels,
-                            &cancel_in_flight,
+                            is_creator, &pending_downloads, &progress,
+                            (&cancels, &cancel_in_flight),
                         ).await;
                         if was_running {
                             active.store(false, Ordering::SeqCst);
@@ -910,8 +910,8 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         cancelling.store(true, Ordering::SeqCst);
                         let stopped = cancel_current(
                             &session, &mut task, &mut active_batch_id,
-                            is_creator, &pending_downloads, &progress, &cancels,
-                            &cancel_in_flight,
+                            is_creator, &pending_downloads, &progress,
+                            (&cancels, &cancel_in_flight),
                         ).await;
                         active.store(false, Ordering::SeqCst);
                         if stopped {
