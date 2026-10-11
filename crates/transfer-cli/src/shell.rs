@@ -337,11 +337,19 @@ async fn get_path(
 /// Joiner asks over already authenticated Control QUIC. The returned
 /// guard stays alive for a whole directory transfer, not each individual
 /// file, so unrelated transfer tasks cannot overlap the Data QUIC lane.
+struct LocalBatchOwner(Arc<AtomicBool>);
+impl Drop for LocalBatchOwner {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 async fn with_batch_lease<F>(
     session: &dyn AuthenticatedSession,
     arbiter: &TransferLease,
     is_creator: bool,
     batch_id: u64,
+    local_ownership: Arc<AtomicBool>,
     operation: F,
 ) -> CliResult<()>
 where
@@ -355,6 +363,9 @@ where
             .await.map_err(|e| format!("已有设备正在传输文件，不能同时启动新任务：{e:?}"))?;
         None
     };
+    // 任务执行权真正获取成功后，才允许本机取消当前批次。
+    local_ownership.store(true, Ordering::SeqCst);
+    let _owner_guard = LocalBatchOwner(local_ownership);
     let result = operation.await;
     if !is_creator {
         let release = release_transfer_via_sdk(session, batch_id).await;
@@ -415,16 +426,11 @@ async fn cancel_current(
         return false;
     }
     cancelling.store(true, Ordering::SeqCst);
-    let mut ids: Vec<u64> = registry.active_ids();
+    let mut ids: Vec<u64> = registry.local_active_ids();
     for id in pending.lock().await.keys().copied() {
         if !ids.contains(&id) { ids.push(id); }
     }
-    if let Some(p) = progress.snapshot() {
-        if p.request_id != 0 && !ids.contains(&p.request_id) {
-            ids.push(p.request_id);
-        }
-    }
-    // 本端确认是发起者后，才允许通知对端并终止本端文件任务。
+     // 本端确认是发起者后，才允许通知对端并终止本端文件任务。
     for id in &ids { registry.cancel(*id); }
     let local_worker = worker.take();
     let interrupted = !ids.is_empty() || local_worker
@@ -508,7 +514,8 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
     let mut task: Option<JoinHandle<()>> = None;
     let mut active_batch_id: Option<u64> = None;
     let progress = Arc::new(TransferProgress::default());
-    let cancels = Arc::new(TransferCancels::with_local_task(Arc::clone(&active)));
+    let local_ownership = Arc::new(AtomicBool::new(false));
+    let cancels = Arc::new(TransferCancels::with_local_task(Arc::clone(&local_ownership)));
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut disconnected = false;
@@ -866,6 +873,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let lanes = Arc::clone(&data_lanes);
                         let activity = Arc::clone(&active);
                         let lease = arbiter.clone();
+                        let local_ownership = Arc::clone(&local_ownership);
                         let progress = Arc::clone(&progress);
                         let cancels = Arc::clone(&cancels);
                         cancelling.store(false, Ordering::SeqCst);
@@ -875,7 +883,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let batch_id = next_id();
                         active_batch_id = Some(batch_id);
                         task = Some(tokio::spawn(async move {
-                            let result = with_batch_lease(&session, &lease, is_creator, batch_id,
+                            let result = with_batch_lease(&session, &lease, is_creator, batch_id, local_ownership,
                                 put_path(&session, &lanes, &root, &source, &remote, &progress, &cancels)).await;
                             match result {
                                 Ok(()) => println!("\n[PUT] 文件或目录任务完成"),
@@ -907,6 +915,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let grant = Arc::clone(&remote_grant);
                         let activity = Arc::clone(&active);
                         let lease = arbiter.clone();
+                        let local_ownership = Arc::clone(&local_ownership);
                         let progress = Arc::clone(&progress);
                         cancelling.store(false, Ordering::SeqCst);
                         let cancellation_flag = Arc::clone(&cancelling);
@@ -915,7 +924,7 @@ async fn run_shell(peer: &ActivePeer, root: Arc<SharedRoot>) -> CliResult<()> {
                         let batch_id = next_id();
                         active_batch_id = Some(batch_id);
                         task = Some(tokio::spawn(async move {
-                            let result = with_batch_lease(&session, &lease, is_creator, batch_id,
+                            let result = with_batch_lease(&session, &lease, is_creator, batch_id, local_ownership,
                                 get_path(&session, &root, Path::new(&source),
                                     Path::new(&destination), &pending, &grant, is_creator)).await;
                             match result {
