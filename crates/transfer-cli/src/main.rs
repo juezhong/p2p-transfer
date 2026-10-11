@@ -46,7 +46,7 @@ fn help() {
            lpwd / lls / lcd     本地目录\n\
            put <local> [remote] 上传文件或目录\n\
            get <remote> [local] 下载文件或目录\n\
-           checksum <local-file> SHA-256 与 MD5 一次计算\n\\
+           checksum <local-file> SHA-256 与 MD5 一次计算\n\
            status / cancel / help / quit\n\
          可通过绝对路径访问系统账户允许的文件；无文件数据中继。\n\
          TUI/GUI、完整故障恢复和公网 NAT 验证仍在开发。",
